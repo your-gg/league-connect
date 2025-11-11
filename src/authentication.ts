@@ -1,6 +1,7 @@
 import cp from 'child_process'
 import util from 'util'
 import { RIOT_GAMES_CERT } from './cert.js'
+import { waitForLockfileAuth } from './lockfile.js'
 
 const exec = util.promisify<typeof cp.exec.__promisify__>(cp.exec)
 
@@ -113,6 +114,23 @@ export class ClientElevatedPermsError extends Error {
   }
 }
 
+async function authenticateFromLockfile(options?: AuthenticationOptions): Promise<Credentials> {
+  const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL
+  const auth = await waitForLockfileAuth(pollInterval)
+
+  const unsafe = options?.unsafe === true
+  const hasCert = options?.certificate !== undefined
+
+  const certificate = hasCert ? options!.certificate : unsafe ? undefined : RIOT_GAMES_CERT
+
+  return {
+    port: auth.port,
+    pid: -1,
+    password: auth.password,
+    certificate
+  }
+}
+
 /**
  * Locates a League Client and retrieves the credentials for the LCU API
  * from the found process
@@ -202,11 +220,22 @@ export async function authenticate(options?: AuthenticationOptions): Promise<Cre
           resolve(result)
         })
         .catch((err) => {
-          if (err instanceof ClientElevatedPermsError) reject(err)
+          if (err instanceof ClientElevatedPermsError) {
+            authenticateFromLockfile(options).then(resolve).catch(reject)
+            return
+          }
+
           setTimeout(self, options?.pollInterval ?? DEFAULT_POLL_INTERVAL, resolve, reject)
         })
     })
   } else {
-    return tryAuthenticate()
+    try {
+      return await tryAuthenticate()
+    } catch (err) {
+      if (err instanceof ClientElevatedPermsError) {
+        return authenticateFromLockfile(options)
+      }
+      throw err
+    }
   }
 }
