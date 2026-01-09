@@ -1,4 +1,5 @@
-import { isProcessRunning } from '../process'; // 경로를 실제 위치에 맞게 수정하세요
+import { getAllProcessNames, isProcessRunning } from '../process';
+import { ClientAuthTimeoutError } from '../authentication'
 
 describe('isProcessRunning 테스트', () => {
   
@@ -37,4 +38,22 @@ describe('isProcessRunning 테스트', () => {
     const result = await isProcessRunning('EXPLORER'); // 윈도우 쿼리는 보통 대소문자 구분 안 함
     expect(typeof result).toBe('boolean');
   });
+
+  test('에러 발생 시 전체 프로세스 목록을 포함해야 함', async () => {
+    try {
+      throw new ClientAuthTimeoutError(1234, 5, await getAllProcessNames())
+    } catch (err) {
+      if (err instanceof ClientAuthTimeoutError) {
+        console.log('총 프로세스 개수:', err.processList.length);
+        console.log('상위 5개 프로세스:', err.processList.slice(0, 5));
+        
+        expect(Array.isArray(err.processList)).toBe(true);
+        expect(err.processList.length).toBeGreaterThan(0);
+        
+        // Sentry 전송 시 데이터가 너무 크면 잘릴 수 있으므로 
+        // 필터링이 필요한지 여기서 판단할 수 있습니다.
+      }
+    }
+  });
+  
 });
