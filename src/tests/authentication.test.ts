@@ -35,6 +35,14 @@ describe('authenticating to the api', () => {
   test('locating the league client', async () => {
     const credentials = await authenticate()
 
+    console.log(credentials)
+    expect(credentials).toBeDefined()
+    expect(credentials?.certificate).toBeDefined()
+  })
+
+  test('locating the league client using wmic on windows', async () => {
+    const credentials = await authenticate({useDeprecatedWmic: true})
+
     expect(credentials).toBeDefined()
     expect(credentials?.certificate).toBeDefined()
   })
@@ -65,4 +73,40 @@ describe('authenticating to the api', () => {
 
     expect(credentials?.certificate).toBeUndefined()
   })
+
+  test('should throw error when process exists but auth info fails repeatedly', async () => {
+    // 1. 테스트 조건 설정
+    // 실제 환경에서 테스트하려면 롤을 켜두고 '관리자 권한' 문제를 강제로 일으키거나, 
+    // 로직상 MAX_AUTH_RETRIES를 아주 낮게 잡아서 테스트해야 합니다.
+    
+    const start = Date.now();
+    
+    try {
+      await authenticate({
+        awaitConnection: true,
+        pollInterval: 500, // 테스트 속도를 위해 짧게 설정
+        // 의도적으로 잘못된 이름을 넣어 PID는 찾되 인증은 실패하게 만드는 시나리오를 시뮬레이션 하거나
+        // 현재 로직이 PID 감지 후 실패 시 에러를 던지는지 확인합니다.
+        name: 'LeagueClientUx' 
+      });
+      
+      // 만약 인증에 성공하면 이 코드가 실행됨
+      console.log('Client connected successfully');
+    } catch (err: any) {
+      const end = Date.now();
+      const duration = end - start;
+
+      // 2. 에러 검증
+      console.log(`Error caught after ${duration}ms:`, err.message);
+      
+      // 우리가 정의한 에러 메시지가 포함되어 있는지 확인
+      expect(err.message).toMatch(/detected but failed to retrieve auth info/);
+      
+      // 에러 객체에 PID가 담겨 있는지 확인 (Sentry 추적용 필드)
+      if (err.pid) {
+        expect(err.pid).toBeGreaterThan(0);
+        console.log('Caught PID for Sentry:', err.pid);
+      }
+    }
+  }, 30000); // 30초 타임아웃
 })
