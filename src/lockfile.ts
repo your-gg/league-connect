@@ -101,7 +101,14 @@ function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
     const raw = fs.readFileSync(installsPath, 'utf8')
     const json = JSON.parse(raw) as Record<string, string>
 
-    const anyPath = Object.values(json).find((p) => p.toLowerCase().includes('riotclientservices.exe'))
+    const values = Object.values(json);
+
+    const anyPath = values.find((p) => {
+      if (typeof p === 'string') {
+        return p.toLowerCase().includes('riotclientservices.exe');
+      }
+      return false;
+    });
     if (!anyPath) return null
 
     const riotClientDir = path.dirname(anyPath)
