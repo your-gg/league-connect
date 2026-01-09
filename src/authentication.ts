@@ -1,5 +1,6 @@
 import cp from 'child_process'
 import util from 'util'
+import { getProcessId, getAllProcessNames} from './process'
 import { RIOT_GAMES_CERT } from './cert.js'
 import { waitForLockfileAuth } from './lockfile.js'
 
@@ -114,6 +115,18 @@ export class ClientElevatedPermsError extends Error {
   }
 }
 
+export class ClientAuthTimeoutError extends Error {
+  public pid: number;
+  public processList: string[];
+
+  constructor(pid: number, retries: number, processList: string[]) {
+    super(`LeagueClient (PID: ${pid}) detected but failed to retrieve auth info after ${retries} attempts.`);
+    this.name = 'ClientAuthTimeoutError';
+    this.pid = pid;
+    this.processList = processList;
+  }
+}
+
 async function authenticateFromLockfile(options?: AuthenticationOptions): Promise<Credentials> {
   const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL
   const auth = await waitForLockfileAuth(pollInterval)
@@ -128,20 +141,6 @@ async function authenticateFromLockfile(options?: AuthenticationOptions): Promis
     pid: -1,
     password: auth.password,
     certificate
-  }
-}
-
-/**
- * Fetch process id
- */
-async function getProcessId(name: string): Promise<number> {
-  try {
-    const command = `Get-CimInstance -Query "SELECT ProcessId from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty ProcessId`
-    const { stdout } = await exec(command, { shell: 'powershell' })
-    const pid = parseInt(stdout.trim(), 10)
-    return isNaN(pid) ? -1 : pid
-  } catch {
-    return -1
   }
 }
 
@@ -253,8 +252,8 @@ if (options?.awaitConnection) {
           retryCountWithPid++;
 
           if (retryCountWithPid >= MAX_AUTH_RETRIES) {
-            const error = new Error(`LeagueClient (PID: ${pid}) detected but failed to retrieve auth info after ${MAX_AUTH_RETRIES} attempts.`);
-            reject(error); 
+            const allProcesses = await getAllProcessNames();
+            reject(new ClientAuthTimeoutError(pid, MAX_AUTH_RETRIES, allProcesses));
           } else {
             setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
           }
