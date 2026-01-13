@@ -4,7 +4,8 @@ export {
   type Credentials,
   ClientNotFoundError,
   ClientElevatedPermsError,
-  InvalidPlatformError
+  InvalidPlatformError,
+  ClientAuthTimeoutError
 } from './authentication.js'
 export { LeagueClient, type LeagueClientOptions } from './client.js'
 export { createHttp1Request, Http1Response } from './http.js'
