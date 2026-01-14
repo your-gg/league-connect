@@ -1,5 +1,6 @@
 import cp from 'child_process'
 import util from 'util'
+import { getProcessId, getAllProcessNames} from './process'
 import { RIOT_GAMES_CERT } from './cert.js'
 import { waitForLockfileAuth } from './lockfile.js'
 
@@ -114,6 +115,18 @@ export class ClientElevatedPermsError extends Error {
   }
 }
 
+export class ClientAuthTimeoutError extends Error {
+  public pid: number;
+  public processList: string[];
+
+  constructor(pid: number, retries: number, processList: string[]) {
+    super(`LeagueClient (PID: ${pid}) detected but failed to retrieve auth info after ${retries} attempts.`);
+    this.name = 'ClientAuthTimeoutError';
+    this.pid = pid;
+    this.processList = processList;
+  }
+}
+
 async function authenticateFromLockfile(options?: AuthenticationOptions): Promise<Credentials> {
   const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL
   const auth = await waitForLockfileAuth(pollInterval)
@@ -146,25 +159,31 @@ async function authenticateFromLockfile(options?: AuthenticationOptions): Promis
  * @throws ClientElevatedPermsError If the League Client is running as administrator and the script is not (Windows only)
  */
 export async function authenticate(options?: AuthenticationOptions): Promise<Credentials> {
-  async function tryAuthenticate() {
-    const name = options?.name ?? DEFAULT_NAME
-    const portRegex = /--app-port=([0-9]+)(?= *"| --)/
-    const passwordRegex = /--remoting-auth-token=(.+?)(?= *"| --)/
-    const pidRegex = /--app-pid=([0-9]+)(?= *"| --)/
-    const isWindows = process.platform === 'win32'
+  const portRegex = /--app-port=([0-9]+)(?= *"| --)/
+  const passwordRegex = /--remoting-auth-token=(.+?)(?= *"| --)/
+  const pidRegex = /--app-pid=([0-9]+)(?= *"| --)/
 
-    let command: string
-    if (!isWindows) {
-      command = `ps x -o args | grep '${name}'`
-    } else if (isWindows && options?.useDeprecatedWmic === true) {
-      command = `wmic process where caption='${name}.exe' get commandline`
-    } else {
-      command = `Get-CimInstance -Query "SELECT * from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty CommandLine`
-    }
+  const name = options?.name ?? DEFAULT_NAME
+  const isWindows = process.platform === 'win32'
+  const executionOptions = isWindows ? { shell: options?.windowsShell ?? ('powershell' as string) } : {}
+  let retryCountWithPid = 0; // PID는 있는데 인증에 실패한 횟수 카운트
+  const MAX_AUTH_RETRIES = 5;
 
-    const executionOptions = isWindows ? { shell: options?.windowsShell ?? ('powershell' as string) } : {}
+  if (!['win32', 'linux', 'darwin'].includes(process.platform)) {
+    throw new InvalidPlatformError()
+  }
 
+  async function tryAuthenticateInternal() {
     try {
+      let command: string
+      if (!isWindows) {
+        command = `ps x -o args | grep '${name}'`
+      } else if (options?.useDeprecatedWmic === true) {
+        command = `wmic process where "caption='${name}.exe'" get commandline`
+      } else {
+        command = `Get-CimInstance -Query "SELECT * from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty CommandLine`
+      }
+
       const { stdout: rawStdout } = await exec(command, executionOptions)
       // TODO: investigate regression with calling .replace on rawStdout
       // Remove newlines from stdout
@@ -193,49 +212,55 @@ export async function authenticate(options?: AuthenticationOptions): Promise<Cre
       }
     } catch (err) {
       if (options?.__internalDebug) console.error(err)
+
       // Check if the user is running the client as an administrator leading to not being able to find the process
       // Requires PowerShell 3.0 or higher
-      if (executionOptions.shell === 'powershell') {
-        const { stdout: isAdmin } = await exec(
+      let isElevated = false
+      if (isWindows && (options?.windowsShell ?? 'powershell') === 'powershell') {
+        const { stdout: adminCheck } = await exec(
           `if ((Get-Process -Name ${name} -ErrorAction SilentlyContinue | Where-Object {!$_.Handle -and !$_.Path})) {Write-Output "True"} else {Write-Output "False"}`,
-          executionOptions
+          { shell: 'powershell' }
         )
-        if (isAdmin.includes('True')) throw new ClientElevatedPermsError()
+        isElevated = adminCheck.includes('True')
       }
+
+      const realPid = await getProcessId(name)
+
+      if (isElevated || realPid !== -1) {
+        const credentials = await authenticateFromLockfile(options)
+        credentials.pid = realPid
+        return credentials
+      }
+
       throw new ClientNotFoundError()
     }
   }
 
-  // Does not run windows/linux/darwin
-  if (!['win32', 'linux', 'darwin'].includes(process.platform)) {
-    throw new InvalidPlatformError()
-  }
-
-  if (options?.awaitConnection) {
-    // Poll until a client is found, attempting to resolve every
-    // `options.pollInterval` milliseconds
+if (options?.awaitConnection) {
     return new Promise(function self(resolve, reject) {
-      tryAuthenticate()
-        .then((result) => {
-          resolve(result)
-        })
-        .catch((err) => {
-          if (err instanceof ClientElevatedPermsError) {
-            authenticateFromLockfile(options).then(resolve).catch(reject)
-            return
-          }
+      getProcessId(name).then(async (pid) => {
+        if (pid === -1) {
+          retryCountWithPid = 0;
+          setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+          return;
+        }
 
-          setTimeout(self, options?.pollInterval ?? DEFAULT_POLL_INTERVAL, resolve, reject)
-        })
-    })
-  } else {
-    try {
-      return await tryAuthenticate()
-    } catch (err) {
-      if (err instanceof ClientElevatedPermsError) {
-        return authenticateFromLockfile(options)
-      }
-      throw err
-    }
+        try {
+          const credentials = await tryAuthenticateInternal();
+          resolve(credentials);
+        } catch (err) {
+          retryCountWithPid++;
+
+          if (retryCountWithPid >= MAX_AUTH_RETRIES) {
+            const allProcesses = await getAllProcessNames();
+            reject(new ClientAuthTimeoutError(pid, MAX_AUTH_RETRIES, allProcesses));
+          } else {
+            setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+          }
+        }
+      });
+    });
   }
+
+  return tryAuthenticateInternal()
 }
