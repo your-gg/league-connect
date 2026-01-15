@@ -94,6 +94,11 @@ declare class ClientNotFoundError extends Error {
 declare class ClientElevatedPermsError extends Error {
     constructor();
 }
+declare class ClientAuthTimeoutError extends Error {
+    pid: number;
+    processList: string[];
+    constructor(pid: number, retries: number, processList: string[]);
+}
 /**
  * Locates a League Client and retrieves the credentials for the LCU API
  * from the found process
@@ -139,8 +144,8 @@ declare class LeagueClient extends EventEmitter {
     private onTick;
 }
 
-declare type HeaderPair = [string, string];
-declare type JsonObjectLike = Record<string, unknown>;
+type HeaderPair = [string, string];
+type JsonObjectLike = Record<string, unknown>;
 interface HttpResponse {
     readonly ok: boolean;
     /** Was the request redirected at some point? */
@@ -221,7 +226,7 @@ interface EventResponse<T = any> {
  *
  * @param data The data payload (deserialized json)
  */
-declare type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) => void;
+type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) => void;
 /**
  * WebSocket extension
  */
@@ -290,4 +295,4 @@ declare function DEPRECATED_request<T = any, R = any>(options: DEPRECATED_Reques
 
 declare function DEPRECATED_connect(credentials: Credentials): Promise<LeagueWebSocket>;
 
-export { AuthenticationOptions, ClientElevatedPermsError, ClientNotFoundError, ConnectionOptions, Credentials, DEPRECATED_RequestOptions, DEPRECATED_Response, DEPRECATED_connect, DEPRECATED_request, EventCallback, EventResponse, HeaderPair, Http1Response, Http2Response, HttpRequestOptions, HttpResponse, InvalidPlatformError, JsonObjectLike, LeagueClient, LeagueClientOptions, LeagueWebSocket, authenticate, createHttp1Request, createHttp2Request, createHttpSession, createWebSocketConnection };
+export { AuthenticationOptions, ClientAuthTimeoutError, ClientElevatedPermsError, ClientNotFoundError, ConnectionOptions, Credentials, DEPRECATED_RequestOptions, DEPRECATED_Response, DEPRECATED_connect, DEPRECATED_request, EventCallback, EventResponse, HeaderPair, Http1Response, Http2Response, HttpRequestOptions, HttpResponse, InvalidPlatformError, JsonObjectLike, LeagueClient, LeagueClientOptions, LeagueWebSocket, authenticate, createHttp1Request, createHttp2Request, createHttpSession, createWebSocketConnection };

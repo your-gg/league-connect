@@ -17,12 +17,20 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target, mod));
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
 var src_exports = {};
 __export(src_exports, {
+  ClientAuthTimeoutError: () => ClientAuthTimeoutError,
   ClientElevatedPermsError: () => ClientElevatedPermsError,
   ClientNotFoundError: () => ClientNotFoundError,
   DEPRECATED_Response: () => DEPRECATED_Response,
@@ -42,8 +50,43 @@ __export(src_exports, {
 module.exports = __toCommonJS(src_exports);
 
 // src/authentication.ts
+var import_child_process2 = __toESM(require("child_process"), 1);
+var import_util2 = __toESM(require("util"), 1);
+
+// src/process.ts
 var import_child_process = __toESM(require("child_process"), 1);
 var import_util = __toESM(require("util"), 1);
+var exec = import_util.default.promisify(import_child_process.default.exec);
+async function getProcessId(name) {
+  const isWindows = process.platform === "win32";
+  try {
+    let command;
+    if (isWindows) {
+      command = `Get-CimInstance -Query "SELECT ProcessId from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty ProcessId`;
+    } else {
+      command = `ps -ax | grep "${name}" | grep -v grep | awk '{print $1}'`;
+    }
+    const { stdout } = await exec(command, isWindows ? { shell: "powershell" } : {});
+    const pid = parseInt(stdout.trim().split("\n")[0], 10);
+    return isNaN(pid) ? -1 : pid;
+  } catch {
+    return -1;
+  }
+}
+async function getAllProcessNames() {
+  const isWindows = process.platform === "win32";
+  try {
+    if (isWindows) {
+      const { stdout } = await exec("tasklist /NH /FO CSV");
+      return stdout.split("\n").map((line) => line.split(",")[0].replace(/"/g, "")).filter((name) => name.trim() !== "");
+    } else {
+      const { stdout } = await exec("ps -ax -o comm | sed 1d");
+      return stdout.split("\n").map((line) => line.trim()).filter((name) => name !== "");
+    }
+  } catch {
+    return [];
+  }
+}
 
 // src/cert.ts
 var RIOT_GAMES_CERT = `
@@ -138,7 +181,13 @@ function tryFromRiotClientInstalls() {
   try {
     const raw = import_fs.default.readFileSync(installsPath, "utf8");
     const json = JSON.parse(raw);
-    const anyPath = Object.values(json).find((p) => p.toLowerCase().includes("riotclientservices.exe"));
+    const values = Object.values(json);
+    const anyPath = values.find((p) => {
+      if (typeof p === "string") {
+        return p.toLowerCase().includes("riotclientservices.exe");
+      }
+      return false;
+    });
     if (!anyPath)
       return null;
     const riotClientDir = import_path.default.dirname(anyPath);
@@ -209,7 +258,7 @@ async function waitForLockfileAuth(pollIntervalMs = 2500) {
 }
 
 // src/authentication.ts
-var exec = import_util.default.promisify(import_child_process.default.exec);
+var exec2 = import_util2.default.promisify(import_child_process2.default.exec);
 var DEFAULT_NAME = "LeagueClientUx";
 var DEFAULT_POLL_INTERVAL = 2500;
 var InvalidPlatformError = class extends Error {
@@ -227,11 +276,21 @@ var ClientElevatedPermsError = class extends Error {
     super("League Client has been detected but is running as administrator");
   }
 };
+var ClientAuthTimeoutError = class extends Error {
+  pid;
+  processList;
+  constructor(pid, retries, processList) {
+    super(`LeagueClient (PID: ${pid}) detected but failed to retrieve auth info after ${retries} attempts.`);
+    this.name = "ClientAuthTimeoutError";
+    this.pid = pid;
+    this.processList = processList;
+  }
+};
 async function authenticateFromLockfile(options) {
-  const pollInterval = (options == null ? void 0 : options.pollInterval) ?? DEFAULT_POLL_INTERVAL;
+  const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL;
   const auth = await waitForLockfileAuth(pollInterval);
-  const unsafe = (options == null ? void 0 : options.unsafe) === true;
-  const hasCert = (options == null ? void 0 : options.certificate) !== void 0;
+  const unsafe = options?.unsafe === true;
+  const hasCert = options?.certificate !== void 0;
   const certificate = hasCert ? options.certificate : unsafe ? void 0 : RIOT_GAMES_CERT;
   return {
     port: auth.port,
@@ -241,30 +300,41 @@ async function authenticateFromLockfile(options) {
   };
 }
 async function authenticate(options) {
-  async function tryAuthenticate() {
-    const name = (options == null ? void 0 : options.name) ?? DEFAULT_NAME;
-    const portRegex = /--app-port=([0-9]+)(?= *"| --)/;
-    const passwordRegex = /--remoting-auth-token=(.+?)(?= *"| --)/;
-    const pidRegex = /--app-pid=([0-9]+)(?= *"| --)/;
-    const isWindows = process.platform === "win32";
-    let command;
-    if (!isWindows) {
-      command = `ps x -o args | grep '${name}'`;
-    } else if (isWindows && (options == null ? void 0 : options.useDeprecatedWmic) === true) {
-      command = `wmic process where caption='${name}.exe' get commandline`;
-    } else {
-      command = `Get-CimInstance -Query "SELECT * from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty CommandLine`;
-    }
-    const executionOptions = isWindows ? { shell: (options == null ? void 0 : options.windowsShell) ?? "powershell" } : {};
+  const portRegex = /--app-port=([0-9]+)(?= *"| --)/;
+  const passwordRegex = /--remoting-auth-token=(.+?)(?= *"| --)/;
+  const pidRegex = /--app-pid=([0-9]+)(?= *"| --)/;
+  const name = options?.name ?? DEFAULT_NAME;
+  const isWindows = process.platform === "win32";
+  const executionOptions = isWindows ? { shell: options?.windowsShell ?? "powershell" } : {};
+  let retryCountWithPid = 0;
+  const MAX_AUTH_RETRIES = 5;
+  if (!["win32", "linux", "darwin"].includes(process.platform)) {
+    throw new InvalidPlatformError();
+  }
+  async function tryAuthenticateInternal() {
     try {
-      const { stdout: rawStdout } = await exec(command, executionOptions);
+      let command;
+      if (!isWindows) {
+        command = `ps x -o args | grep '${name}'`;
+      } else if (options?.useDeprecatedWmic === true) {
+        command = `wmic process where "caption='${name}.exe'" get commandline`;
+      } else {
+        command = `Get-CimInstance -Query "SELECT * from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty CommandLine`;
+      }
+      const { stdout: rawStdout } = await exec2(command, executionOptions);
       const stdout = rawStdout.replace(/\n|\r/g, "");
       const [, port] = stdout.match(portRegex);
       const [, password] = stdout.match(passwordRegex);
       const [, pid] = stdout.match(pidRegex);
-      const unsafe = (options == null ? void 0 : options.unsafe) === true;
-      const hasCert = (options == null ? void 0 : options.certificate) !== void 0;
-      const certificate = hasCert ? options.certificate : unsafe ? void 0 : RIOT_GAMES_CERT;
+      const unsafe = options?.unsafe === true;
+      const hasCert = options?.certificate !== void 0;
+      const certificate = hasCert ? options.certificate : (
+        // Otherwise: does the user want unsafe requests?
+        unsafe ? void 0 : (
+          // Didn't specify, use our own certificate
+          RIOT_GAMES_CERT
+        )
+      );
       return {
         port: Number(port),
         pid: Number(pid),
@@ -272,41 +342,49 @@ async function authenticate(options) {
         certificate
       };
     } catch (err) {
-      if (options == null ? void 0 : options.__internalDebug)
+      if (options?.__internalDebug)
         console.error(err);
-      if (executionOptions.shell === "powershell") {
-        const { stdout: isAdmin } = await exec(`if ((Get-Process -Name ${name} -ErrorAction SilentlyContinue | Where-Object {!$_.Handle -and !$_.Path})) {Write-Output "True"} else {Write-Output "False"}`, executionOptions);
-        if (isAdmin.includes("True"))
-          throw new ClientElevatedPermsError();
+      let isElevated = false;
+      if (isWindows && (options?.windowsShell ?? "powershell") === "powershell") {
+        const { stdout: adminCheck } = await exec2(
+          `if ((Get-Process -Name ${name} -ErrorAction SilentlyContinue | Where-Object {!$_.Handle -and !$_.Path})) {Write-Output "True"} else {Write-Output "False"}`,
+          { shell: "powershell" }
+        );
+        isElevated = adminCheck.includes("True");
+      }
+      const realPid = await getProcessId(name);
+      if (isElevated || realPid !== -1) {
+        const credentials = await authenticateFromLockfile(options);
+        credentials.pid = realPid;
+        return credentials;
       }
       throw new ClientNotFoundError();
     }
   }
-  if (!["win32", "linux", "darwin"].includes(process.platform)) {
-    throw new InvalidPlatformError();
-  }
-  if (options == null ? void 0 : options.awaitConnection) {
+  if (options?.awaitConnection) {
     return new Promise(function self(resolve, reject) {
-      tryAuthenticate().then((result) => {
-        resolve(result);
-      }).catch((err) => {
-        if (err instanceof ClientElevatedPermsError) {
-          authenticateFromLockfile(options).then(resolve).catch(reject);
+      getProcessId(name).then(async (pid) => {
+        if (pid === -1) {
+          retryCountWithPid = 0;
+          setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
           return;
         }
-        setTimeout(self, (options == null ? void 0 : options.pollInterval) ?? DEFAULT_POLL_INTERVAL, resolve, reject);
+        try {
+          const credentials = await tryAuthenticateInternal();
+          resolve(credentials);
+        } catch (err) {
+          retryCountWithPid++;
+          if (retryCountWithPid >= MAX_AUTH_RETRIES) {
+            const allProcesses = await getAllProcessNames();
+            reject(new ClientAuthTimeoutError(pid, MAX_AUTH_RETRIES, allProcesses));
+          } else {
+            setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+          }
+        }
       });
     });
-  } else {
-    try {
-      return await tryAuthenticate();
-    } catch (err) {
-      if (err instanceof ClientElevatedPermsError) {
-        return authenticateFromLockfile(options);
-      }
-      throw err;
-    }
   }
+  return tryAuthenticateInternal();
 }
 
 // src/client.ts
@@ -320,6 +398,9 @@ var LeagueClient = class extends import_events.EventEmitter {
   }
   isListening = false;
   credentials = void 0;
+  /**
+   * Start listening for League Client processes
+   */
   start() {
     if (!this.isListening) {
       this.isListening = true;
@@ -329,11 +410,13 @@ var LeagueClient = class extends import_events.EventEmitter {
       this.onTick();
     }
   }
+  /**
+   * Stop listening for client stop/start
+   */
   stop() {
     this.isListening = false;
   }
   async onTick() {
-    var _a, _b, _c;
     if (this.isListening) {
       if (this.credentials !== void 0) {
         if (!processExists(this.credentials.pid)) {
@@ -343,18 +426,18 @@ var LeagueClient = class extends import_events.EventEmitter {
         } else {
           setTimeout(() => {
             this.onTick();
-          }, ((_a = this.options) == null ? void 0 : _a.pollInterval) ?? DEFAULT_POLL_INTERVAL2);
+          }, this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2);
         }
       } else {
         const credentials = await authenticate({
           awaitConnection: true,
-          pollInterval: ((_b = this.options) == null ? void 0 : _b.pollInterval) ?? DEFAULT_POLL_INTERVAL2
+          pollInterval: this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2
         });
         this.credentials = credentials;
         this.emit("connect", credentials);
         setTimeout(() => {
           this.onTick();
-        }, ((_c = this.options) == null ? void 0 : _c.pollInterval) ?? DEFAULT_POLL_INTERVAL2);
+        }, this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2);
       }
     }
   }
@@ -363,13 +446,13 @@ function processExists(pid) {
   try {
     return process.kill(pid, 0);
   } catch (err) {
-    return (err == null ? void 0 : err.code) === "EPERM";
+    return err?.code === "EPERM";
   }
 }
 
 // src/http.ts
 var import_https = __toESM(require("https"), 1);
-var import_util2 = require("util");
+var import_util3 = require("util");
 var import_assert = __toESM(require("assert"), 1);
 
 // src/trim.ts
@@ -424,31 +507,34 @@ var Http1Response = class {
 async function createHttp1Request(options, credentials) {
   const agentOptions = credentials.certificate === void 0 ? { rejectUnauthorized: false } : { ca: credentials.certificate };
   return new Promise((resolve, reject) => {
-    const request = import_https.default.request({
-      host: "127.0.0.1",
-      port: credentials.port,
-      path: "/" + trim(options.url),
-      method: options.method,
-      headers: {
-        Accept: "*/*",
-        "Content-Type": "application/json",
-        Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
+    const request = import_https.default.request(
+      {
+        host: "127.0.0.1",
+        port: credentials.port,
+        path: "/" + trim(options.url),
+        method: options.method,
+        headers: {
+          Accept: "*/*",
+          "Content-Type": "application/json",
+          Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
+        },
+        agent: new import_https.default.Agent(agentOptions)
       },
-      agent: new import_https.default.Agent(agentOptions)
-    }, (response) => {
-      let buffer = [];
-      response.on("data", (data) => void buffer.push(data));
-      response.on("end", () => {
-        try {
-          resolve(new Http1Response(response, Buffer.concat(buffer)));
-        } catch (jsonError) {
-          reject(jsonError);
-        }
-      });
-    });
+      (response) => {
+        let buffer = [];
+        response.on("data", (data) => void buffer.push(data));
+        response.on("end", () => {
+          try {
+            resolve(new Http1Response(response, Buffer.concat(buffer)));
+          } catch (jsonError) {
+            reject(jsonError);
+          }
+        });
+      }
+    );
     if (options.body !== void 0) {
       const data = JSON.stringify(options.body);
-      const body = new import_util2.TextEncoder().encode(data);
+      const body = new import_util3.TextEncoder().encode(data);
       request.write(body, "utf8");
     }
     request.on("error", (err) => reject(err));
@@ -458,7 +544,7 @@ async function createHttp1Request(options, credentials) {
 
 // src/http2.ts
 var import_http2 = __toESM(require("http2"), 1);
-var import_util3 = require("util");
+var import_util4 = require("util");
 var import_assert2 = __toESM(require("assert"), 1);
 async function createHttpSession(credentials) {
   const certificate = credentials.certificate ?? RIOT_GAMES_CERT;
@@ -517,7 +603,7 @@ async function createHttp2Request(options, session, credentials) {
   });
   if (options.body) {
     const data = JSON.stringify(options.body);
-    const body = new import_util3.TextEncoder().encode(data);
+    const body = new import_util4.TextEncoder().encode(data);
     request.write(body, "utf8");
   }
   return new Promise((resolve, reject) => {
@@ -552,12 +638,11 @@ var LeagueWebSocket = class extends import_ws.default {
       this.send(JSON.stringify([5, "OnJsonApiEvent"]));
     });
     this.on("message", (content) => {
-      var _a;
       try {
         const json = JSON.parse(content);
         const [res] = json.slice(2);
         if (this.subscriptions.has(res.uri)) {
-          (_a = this.subscriptions.get(res.uri)) == null ? void 0 : _a.forEach((cb) => {
+          this.subscriptions.get(res.uri)?.forEach((cb) => {
             cb(res.data, res);
           });
         }
@@ -566,12 +651,11 @@ var LeagueWebSocket = class extends import_ws.default {
     });
   }
   subscribe(path2, effect) {
-    var _a;
     const p = `/${trim(path2)}`;
     if (!this.subscriptions.has(p)) {
       this.subscriptions.set(p, [effect]);
     } else {
-      (_a = this.subscriptions.get(p)) == null ? void 0 : _a.push(effect);
+      this.subscriptions.get(p)?.push(effect);
     }
   }
   unsubscribe(path2) {
@@ -587,21 +671,22 @@ async function createWebSocketConnection(options = {}) {
       headers: {
         Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
       },
-      agent: new import_https2.default.Agent(typeof (credentials == null ? void 0 : credentials.certificate) === "undefined" ? {
-        rejectUnauthorized: false
-      } : {
-        ca: credentials == null ? void 0 : credentials.certificate
-      })
+      agent: new import_https2.default.Agent(
+        typeof credentials?.certificate === "undefined" ? {
+          rejectUnauthorized: false
+        } : {
+          ca: credentials?.certificate
+        }
+      )
     });
     const errorHandler = ws.onerror = (err) => {
-      var _a;
       options.__internalRetryCount = options.__internalRetryCount ?? 0;
       options.pollInterval = options.pollInterval ?? 1e3;
       options.maxRetries = options.maxRetries ?? 10;
       if (options.__internalMockFaultyConnection && options.__internalMockCallback) {
         if (err.message.includes("EndTestOpen") && options.__internalRetryCount >= options.maxRetries)
           resolve(ws);
-        (_a = options.__internalMockCallback) == null ? void 0 : _a.call(options);
+        options.__internalMockCallback?.();
       }
       ws.close();
       if (err.message.includes("ECONNREFUSED")) {
@@ -640,6 +725,9 @@ var DEPRECATED_Response = class extends import_node_fetch.Response {
   constructor(parent) {
     super(parent.body, parent);
   }
+  /**
+   * Deserialize the response body into T
+   */
   async json() {
     const object = await super.json();
     return object;
@@ -647,7 +735,7 @@ var DEPRECATED_Response = class extends import_node_fetch.Response {
 };
 async function DEPRECATED_request(options, credentials) {
   const uri = trim(options.url);
-  const url = `https://127.0.0.1:${credentials == null ? void 0 : credentials.port}/${uri}`;
+  const url = `https://127.0.0.1:${credentials?.port}/${uri}`;
   const hasBody = options.method !== "GET" && options.body !== void 0;
   const response = await (0, import_node_fetch.default)(url, {
     method: options.method,
@@ -655,13 +743,15 @@ async function DEPRECATED_request(options, credentials) {
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      Authorization: "Basic " + Buffer.from(`riot:${credentials == null ? void 0 : credentials.password}`).toString("base64")
+      Authorization: "Basic " + Buffer.from(`riot:${credentials?.password}`).toString("base64")
     },
-    agent: new import_https3.default.Agent(typeof (credentials == null ? void 0 : credentials.certificate) === "undefined" ? {
-      rejectUnauthorized: false
-    } : {
-      ca: credentials == null ? void 0 : credentials.certificate
-    })
+    agent: new import_https3.default.Agent(
+      typeof credentials?.certificate === "undefined" ? {
+        rejectUnauthorized: false
+      } : {
+        ca: credentials?.certificate
+      }
+    )
   });
   return new DEPRECATED_Response(response);
 }
@@ -674,15 +764,18 @@ async function DEPRECATED_connect(credentials) {
     headers: {
       Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
     },
-    agent: new import_https4.default.Agent(typeof (credentials == null ? void 0 : credentials.certificate) === "undefined" ? {
-      rejectUnauthorized: false
-    } : {
-      ca: credentials == null ? void 0 : credentials.certificate
-    })
+    agent: new import_https4.default.Agent(
+      typeof credentials?.certificate === "undefined" ? {
+        rejectUnauthorized: false
+      } : {
+        ca: credentials?.certificate
+      }
+    )
   });
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ClientAuthTimeoutError,
   ClientElevatedPermsError,
   ClientNotFoundError,
   DEPRECATED_Response,
