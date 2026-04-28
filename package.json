@@ -19,6 +19,7 @@
     "prepublishOnly": "npm run build",
     "build": "tsup src/index.ts --format esm,cjs --clean --dts --sourcemap",
     "publish:gh": "npm publish",
+    "release": "node scripts/release-tag.mjs",
     "fmt": "prettier --config .prettierrc src/ examples/ jest.config.cjs --write",
     "test": "jest"
   },
