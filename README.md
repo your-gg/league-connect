@@ -40,14 +40,23 @@ You should also check out the [examples](examples) directory for code examples.
 
 ### Installation
 
-League Connect ships as an NPM module, installable through Yarn or NPM. To add the
-package to your project, install it through your package manager of choice.
+This fork is published to **GitHub Packages** as `@your-gg/league-connect`. In the project
+that consumes it, add an `.npmrc` (and a `GH_TOKEN` / `NODE_AUTH_TOKEN` with `read:packages`
+in CI):
+
+```ini
+@your-gg:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GH_TOKEN}
+always-auth=true
+```
 
 ```sh
-$ yarn add league-connect
+yarn add @your-gg/league-connect
 # Or ...
-$ npm install league-connect
+npm install @your-gg/league-connect
 ```
+
+The upstream package on the public npm registry is still named `league-connect` if you need that instead.
 
 ## Usage
 
@@ -67,7 +76,7 @@ requests or connections to the APIs.
 **Code Example**
 
 ```js
-import { authenticate } from 'league-connect'
+import { authenticate } from '@your-gg/league-connect'
 
 const credentials = await authenticate()
 console.log(credentials) // { password: '37dn2gsxH3ns', port: 37241 }
@@ -87,7 +96,7 @@ LeagueClientUx process. If you wish to await until a client is found, you can us
 | windowsShell | `powershell` | Set the Windows shell to use. Either powershell or cmd. |
 
 ```js
-import { authenticate } from 'league-connect'
+import { authenticate } from '@your-gg/league-connect'
 
 const credentials = await authenticate({
   awaitConnection: true,
@@ -105,7 +114,7 @@ The League Client runs a WebSocket for an event bus which anything using the cli
 may also connect to this socket over wss. LeagueConnect provides a function to retrieve a WebSocket connection.
 
 ```js
-import { createWebSocketConnection } from 'league-connect'
+import { createWebSocketConnection } from '@your-gg/league-connect'
 
 const ws = await createWebSocketConnection()
 ```
@@ -117,7 +126,7 @@ The socket instance automatically subscribes to Json events from the API which w
 **Code Example**
 
 ```js
-import { createWebSocketConnection } from 'league-connect'
+import { createWebSocketConnection } from '@your-gg/league-connect'
 
 const ws = await createWebSocketConnection({
   authenticationOptions: {
@@ -139,7 +148,7 @@ The `createWebSocketConnection` function will retry connecting to the WebSocket 
 | maxRetries | `10` | The maximum amount of times to retry connecting to the WS. `-1` to keep retrying until connected |
 
 ```js
-import { createWebSocketConnection } from 'league-connect'
+import { createWebSocketConnection } from '@your-gg/league-connect'
 
 const ws = await createWebSocketConnection({
   authenticationOptions: {
@@ -167,7 +176,7 @@ LeagueConnect supports sending HTTP requests to any of the League Client API end
 If you're looking to use HTTP/2.0, you first need to create a session.
 
 ```js
-import { authenticate, createHttpSession, createHttp2Request } from 'league-connect'
+import { authenticate, createHttpSession, createHttp2Request } from '@your-gg/league-connect'
 
 const credentials = await authenticate()
 const session = await createHttpSession(credentials)
@@ -183,7 +192,7 @@ session.close()
 For HTTP/1.0, you can simply use the `createHttp1Request` function.
 
 ```js
-import { authenticate, createHttp1Request } from 'league-connect'
+import { authenticate, createHttp1Request } from '@your-gg/league-connect'
 
 const credentials = await authenticate()
 const response = await createHttp1Request({
@@ -211,7 +220,7 @@ reporting shutdown/startup of the application. The emitter has two listeners: `c
 **Code Example**
 
 ```js
-import { authenticate, LeagueClient } from 'league-connect'
+import { authenticate, LeagueClient } from '@your-gg/league-connect'
 
 const credentials = await authenticate()
 const client = new LeagueClient(credentials)
@@ -238,7 +247,7 @@ constructor.
 | pollInterval | `2500` | Duration in milliseconds between process existence check |
 
 ```js
-import { authenticate, LeagueClient } from 'league-connect'
+import { authenticate, LeagueClient } from '@your-gg/league-connect'
 
 const credentials = await authenticate()
 const client = new LeagueClient(credentials, {
