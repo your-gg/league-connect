@@ -99,16 +99,24 @@ function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
 
   try {
     const raw = fs.readFileSync(installsPath, 'utf8')
-    const json = JSON.parse(raw) as Record<string, string>
+    const json = JSON.parse(raw)
 
-    const values = Object.values(json);
-
-    const anyPath = values.find((p) => {
-      if (typeof p === 'string') {
-        return p.toLowerCase().includes('riotclientservices.exe');
+    // Preferred path: associated_client keys are the actual League install paths.
+    // Riot's installer writes these whenever League is installed at a non-default location.
+    if (json.associated_client && typeof json.associated_client === 'object') {
+      for (const lolPath of Object.keys(json.associated_client)) {
+        const lolRoot = path.normalize(lolPath)
+        const lockfile = path.join(lolRoot, 'lockfile')
+        if (fileExists(lockfile)) {
+          return { root: lolRoot, lockfile }
+        }
       }
-      return false;
-    });
+    }
+
+    // Fallback: original sibling-folder heuristic (works for default installs where League is
+    // a sibling of Riot Client). Kept for back-compat in case associated_client is missing.
+    const values = Object.values(json).filter((p): p is string => typeof p === 'string')
+    const anyPath = values.find((p) => p.toLowerCase().includes('riotclientservices.exe'))
     if (!anyPath) return null
 
     const riotClientDir = path.dirname(anyPath)
