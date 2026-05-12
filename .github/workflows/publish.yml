@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,10 +26,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run unit tests
+        run: npm run test:unit
+
       - name: Build
         run: npm run build
 
       - name: Publish to GitHub Packages
-        run: npm publish
+        run: |
+          TAG=$(node -e "const v='${{ github.ref_name }}'; console.log(v.includes('-') ? 'beta' : 'latest')")
+          npm publish --tag $TAG
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

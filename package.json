@@ -21,7 +21,8 @@
     "publish:gh": "npm publish",
     "release": "node scripts/release-tag.mjs",
     "fmt": "prettier --config .prettierrc src/ examples/ jest.config.cjs --write",
-    "test": "jest"
+    "test": "jest",
+    "test:unit": "jest --testPathPattern='lockfile|authentication' --testNamePattern='error classes|readLockfile|findLeague'"
   },
   "repository": {
     "type": "git",
