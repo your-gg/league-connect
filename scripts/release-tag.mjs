@@ -41,7 +41,14 @@ if (!raw) {
   process.exit(1)
 }
 
-const ver = raw.startsWith('v') ? raw.slice(1) : raw
+// npm으로만 실행 가능 (yarn 차단)
+const userAgent = process.env.npm_config_user_agent ?? ''
+if (!userAgent.startsWith('npm')) {
+  console.error('error: use "npm run release" instead of yarn/pnpm')
+  process.exit(1)
+}
+
+
 const tag = `v${ver}`
 const pkgPath = join(root, 'package.json')
 const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
