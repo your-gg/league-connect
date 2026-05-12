@@ -2,7 +2,7 @@ import cp from 'child_process'
 import util from 'util'
 import { getProcessId, getAllProcessNames} from './process'
 import { RIOT_GAMES_CERT } from './cert.js'
-import { findLeagueInstall, readLockfile } from './lockfile.js'
+import { findLeagueInstallDir, findLeagueInstall, readLockfile } from './lockfile.js'
 
 const exec = util.promisify<typeof cp.exec.__promisify__>(cp.exec)
 
@@ -81,6 +81,13 @@ export interface AuthenticationOptions {
    */
   windowsShell?: 'cmd' | 'powershell'
   /**
+   * League of Legends installation path. Use this when the automatic discovery
+   * fails (e.g. custom install location). Passed directly to findLeagueInstall.
+   *
+   * Example: 'D:\\Games\\League of Legends'
+   */
+  leagueInstallPath?: string
+  /**
    * Debug mode. Prints error information to console.
    * @internal
    */
@@ -112,6 +119,16 @@ export class ClientNotFoundError extends Error {
 export class ClientElevatedPermsError extends Error {
   constructor() {
     super('League Client has been detected but is running as administrator')
+  }
+}
+
+/**
+ * Indicates that the League Client installation path could not be found.
+ * Pass `leagueInstallPath` in AuthenticationOptions to resolve this.
+ */
+export class ClientInstallNotFoundError extends Error {
+  constructor() {
+    super('League Client installation path could not be located')
   }
 }
 
@@ -211,14 +228,20 @@ export async function authenticate(options?: AuthenticationOptions): Promise<Cre
       const realPid = await getProcessId(name)
 
       if (isElevated || realPid !== -1) {
-        const install = findLeagueInstall()
+        // 디렉토리 자체를 못 찾으면 → 설치 경로 미상 (재시도해도 의미 없음)
+        const installDir = findLeagueInstallDir(options?.leagueInstallPath)
+        if (!installDir) {
+          throw new ClientInstallNotFoundError()
+        }
+
+        // 디렉토리는 찾았지만 lockfile 없음 → 부팅 중 (재시도 대상)
+        const install = findLeagueInstall(options?.leagueInstallPath)
         if (!install) {
-          if (isElevated) throw new ClientElevatedPermsError()
           throw new ClientNotFoundError()
         }
+
         const auth = readLockfile(install.lockfile)
         if (!auth) {
-          if (isElevated) throw new ClientElevatedPermsError()
           throw new ClientNotFoundError()
         }
 
@@ -246,8 +269,14 @@ if (options?.awaitConnection) {
           const credentials = await tryAuthenticateInternal();
           resolve(credentials);
         } catch (err) {
-          // ClientElevatedPermsError / ClientNotFoundError는 프로세스 상태 문제가 아니라
-          // 경로 탐색 실패이므로 카운터 리셋 후 재시도
+          // ClientInstallNotFoundError는 재시도해도 의미 없음 → 즉시 reject
+          if (err instanceof ClientInstallNotFoundError) {
+            reject(err)
+            return
+          }
+
+          // ClientElevatedPermsError / ClientNotFoundError → 경로는 알지만 아직 준비 안 됨 (부팅 중 등)
+          // 카운터 리셋 후 재시도
           if (err instanceof ClientElevatedPermsError || err instanceof ClientNotFoundError) {
             retryCountWithPid = 0;
             setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);

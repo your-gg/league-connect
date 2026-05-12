@@ -4,6 +4,7 @@ export {
   type Credentials,
   ClientNotFoundError,
   ClientElevatedPermsError,
+  ClientInstallNotFoundError,
   InvalidPlatformError,
   ClientAuthTimeoutError
 } from './authentication.js'
