@@ -2,7 +2,7 @@ import cp from 'child_process'
 import util from 'util'
 import { getProcessId, getAllProcessNames} from './process'
 import { RIOT_GAMES_CERT } from './cert.js'
-import { waitForLockfileAuth } from './lockfile.js'
+import { findLeagueInstall, readLockfile } from './lockfile.js'
 
 const exec = util.promisify<typeof cp.exec.__promisify__>(cp.exec)
 
@@ -127,22 +127,6 @@ export class ClientAuthTimeoutError extends Error {
   }
 }
 
-async function authenticateFromLockfile(options?: AuthenticationOptions): Promise<Credentials> {
-  const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL
-  const auth = await waitForLockfileAuth(pollInterval)
-
-  const unsafe = options?.unsafe === true
-  const hasCert = options?.certificate !== undefined
-
-  const certificate = hasCert ? options!.certificate : unsafe ? undefined : RIOT_GAMES_CERT
-
-  return {
-    port: auth.port,
-    pid: -1,
-    password: auth.password,
-    certificate
-  }
-}
 
 /**
  * Locates a League Client and retrieves the credentials for the LCU API
@@ -227,9 +211,22 @@ export async function authenticate(options?: AuthenticationOptions): Promise<Cre
       const realPid = await getProcessId(name)
 
       if (isElevated || realPid !== -1) {
-        const credentials = await authenticateFromLockfile(options)
-        credentials.pid = realPid
-        return credentials
+        const install = findLeagueInstall()
+        if (!install) {
+          if (isElevated) throw new ClientElevatedPermsError()
+          throw new ClientNotFoundError()
+        }
+        const auth = readLockfile(install.lockfile)
+        if (!auth) {
+          if (isElevated) throw new ClientElevatedPermsError()
+          throw new ClientNotFoundError()
+        }
+
+        const unsafe = options?.unsafe === true
+        const hasCert = options?.certificate !== undefined
+        const certificate = hasCert ? options!.certificate : unsafe ? undefined : RIOT_GAMES_CERT
+
+        return { port: auth.port, pid: realPid, password: auth.password, certificate }
       }
 
       throw new ClientNotFoundError()
@@ -249,6 +246,14 @@ if (options?.awaitConnection) {
           const credentials = await tryAuthenticateInternal();
           resolve(credentials);
         } catch (err) {
+          // ClientElevatedPermsError / ClientNotFoundError는 프로세스 상태 문제가 아니라
+          // 경로 탐색 실패이므로 카운터 리셋 후 재시도
+          if (err instanceof ClientElevatedPermsError || err instanceof ClientNotFoundError) {
+            retryCountWithPid = 0;
+            setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+            return;
+          }
+
           retryCountWithPid++;
 
           if (retryCountWithPid >= MAX_AUTH_RETRIES) {

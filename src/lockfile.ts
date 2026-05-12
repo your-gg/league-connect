@@ -191,22 +191,3 @@ export function readLockfile(lockfilePath: string): LockfileAuthInfo | null {
     return null
   }
 }
-
-/**
- * 롤이 관리자 모드로 떠있을 때:
- *  - 프로세스 기준 authenticate는 막히니까
- *  - lockfile이 나올 때까지 poll 하면서 기다렸다가 auth 정보를 리턴
- */
-export async function waitForLockfileAuth(pollIntervalMs = 2500): Promise<LockfileAuthInfo> {
-  while (true) {
-    const install = findLeagueInstall()
-    if (install) {
-      const auth = readLockfile(install.lockfile)
-      if (auth) {
-        return auth
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
-  }
-}
