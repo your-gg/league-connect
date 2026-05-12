@@ -33,6 +33,8 @@ jobs:
         run: npm run build
 
       - name: Publish to GitHub Packages
-        run: npm publish
+        run: |
+          TAG=$(node -e "const v='${{ github.ref_name }}'; console.log(v.includes('-') ? 'beta' : 'latest')")
+          npm publish --tag $TAG
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
