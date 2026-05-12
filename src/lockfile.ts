@@ -25,29 +25,30 @@ function fileExists(p: string): boolean {
 }
 
 /**
- * 1순위: 환경변수
- *  - LEAGUE_INSTALL_PATH="D:\Riot Games\League of Legends"
+ * 1순위: 수동 지정 경로
  */
-function tryFromEnv(): LeagueInstallInfo | null {
-  const envPath = process.env.LEAGUE_INSTALL_PATH
-  if (!envPath) return null
-
-  const root = path.resolve(envPath)
-  const lockfile = path.join(root, 'lockfile')
-
-  if (fileExists(lockfile)) {
-    return { root, lockfile }
-  }
-
-  return null
+function tryRootFromPath(installPath: string): string | null {
+  const root = path.resolve(installPath)
+  return fileExists(root) ? root : null
 }
 
 /**
- * 2순위: Riot Metadata
+ * 2순위: 환경변수
+ *  - LEAGUE_INSTALL_PATH="D:\Riot Games\League of Legends"
+ */
+function tryRootFromEnv(): string | null {
+  const envPath = process.env.LEAGUE_INSTALL_PATH
+  if (!envPath) return null
+  const root = path.resolve(envPath)
+  return fileExists(root) ? root : null
+}
+
+/**
+ * 3순위: Riot Metadata
  *  - %ProgramData%\Riot Games\Metadata\league_of_legends.*\*.product_settings.yaml
  *  - product_install_root / product_install_full_path 안에 설치 경로가 들어있음
  */
-function tryFromMetadata(): LeagueInstallInfo | null {
+function tryRootFromMetadata(): string | null {
   const programData = getProgramDataDir()
   const metadataRoot = path.join(programData, 'Riot Games', 'Metadata')
 
@@ -79,19 +80,16 @@ function tryFromMetadata(): LeagueInstallInfo | null {
       root = path.dirname(root)
     }
 
-    const lockfile = path.join(root, 'lockfile')
-    if (fileExists(lockfile)) {
-      return { root, lockfile }
-    }
+    if (fileExists(root)) return root
   }
 
   return null
 }
 
 /**
- * 3순위: RiotClientInstalls.json → Riot 루트 → League of Legends 폴더
+ * 4순위: RiotClientInstalls.json → associated_client 키 → sibling 휴리스틱
  */
-function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
+function tryRootFromRiotClientInstalls(): string | null {
   const programData = getProgramDataDir()
   const installsPath = path.join(programData, 'Riot Games', 'RiotClientInstalls.json')
 
@@ -106,10 +104,7 @@ function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
     if (json.associated_client && typeof json.associated_client === 'object') {
       for (const lolPath of Object.keys(json.associated_client)) {
         const lolRoot = path.normalize(lolPath)
-        const lockfile = path.join(lolRoot, 'lockfile')
-        if (fileExists(lockfile)) {
-          return { root: lolRoot, lockfile }
-        }
+        if (fileExists(lolRoot)) return lolRoot
       }
     }
 
@@ -121,13 +116,9 @@ function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
 
     const riotClientDir = path.dirname(anyPath)
     const riotRoot = path.resolve(riotClientDir, '..') // 예: C:\Riot Games
-
     const lolRoot = path.join(riotRoot, 'League of Legends')
-    const lockfile = path.join(lolRoot, 'lockfile')
 
-    if (fileExists(lockfile)) {
-      return { root: lolRoot, lockfile }
-    }
+    if (fileExists(lolRoot)) return lolRoot
   } catch (e) {
     console.error('[league-connect] failed to parse RiotClientInstalls.json', e)
     return null
@@ -137,36 +128,45 @@ function tryFromRiotClientInstalls(): LeagueInstallInfo | null {
 }
 
 /**
- * 4순위: 옛날 기본 설치 경로
+ * 5순위: 옛날 기본 설치 경로
  */
-function tryDefaultPath(): LeagueInstallInfo | null {
+function tryDefaultRoot(): string | null {
   const root = 'C:\\Riot Games\\League of Legends'
-  const lockfile = path.join(root, 'lockfile')
-
-  if (fileExists(lockfile)) {
-    return { root, lockfile }
-  }
-
-  return null
+  return fileExists(root) ? root : null
 }
 
 /**
- * 설치 루트 + lockfile 경로 찾기
+ * 설치 디렉토리 탐색 (lockfile 존재 여부는 확인하지 않음)
+ *
+ * @param installPath 수동 지정 경로 (최우선 적용)
  */
-export function findLeagueInstall(): LeagueInstallInfo | null {
-  const fromEnv = tryFromEnv()
-  if (fromEnv) return fromEnv
+export function findLeagueInstallDir(installPath?: string): string | null {
+  if (installPath) {
+    const root = tryRootFromPath(installPath)
+    if (root) return root
+  }
 
-  const fromMetadata = tryFromMetadata()
-  if (fromMetadata) return fromMetadata
+  return (
+    tryRootFromEnv() ??
+    tryRootFromMetadata() ??
+    tryRootFromRiotClientInstalls() ??
+    tryDefaultRoot()
+  )
+}
 
-  const fromInstalls = tryFromRiotClientInstalls()
-  if (fromInstalls) return fromInstalls
+/**
+ * 설치 루트 + lockfile 경로 찾기 (lockfile 존재까지 확인)
+ *
+ * @param installPath 수동 지정 경로 (최우선 적용)
+ */
+export function findLeagueInstall(installPath?: string): LeagueInstallInfo | null {
+  const root = findLeagueInstallDir(installPath)
+  if (!root) return null
 
-  const fromDefault = tryDefaultPath()
-  if (fromDefault) return fromDefault
+  const lockfile = path.join(root, 'lockfile')
+  if (!fileExists(lockfile)) return null
 
-  return null
+  return { root, lockfile }
 }
 
 /**
@@ -189,24 +189,5 @@ export function readLockfile(lockfilePath: string): LockfileAuthInfo | null {
   } catch (e) {
     console.error('[league-connect] failed to read lockfile:', e)
     return null
-  }
-}
-
-/**
- * 롤이 관리자 모드로 떠있을 때:
- *  - 프로세스 기준 authenticate는 막히니까
- *  - lockfile이 나올 때까지 poll 하면서 기다렸다가 auth 정보를 리턴
- */
-export async function waitForLockfileAuth(pollIntervalMs = 2500): Promise<LockfileAuthInfo> {
-  while (true) {
-    const install = findLeagueInstall()
-    if (install) {
-      const auth = readLockfile(install.lockfile)
-      if (auth) {
-        return auth
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
   }
 }

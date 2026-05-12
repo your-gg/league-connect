@@ -2,7 +2,7 @@ import cp from 'child_process'
 import util from 'util'
 import { getProcessId, getAllProcessNames} from './process'
 import { RIOT_GAMES_CERT } from './cert.js'
-import { waitForLockfileAuth } from './lockfile.js'
+import { findLeagueInstallDir, findLeagueInstall, readLockfile } from './lockfile.js'
 
 const exec = util.promisify<typeof cp.exec.__promisify__>(cp.exec)
 
@@ -81,6 +81,13 @@ export interface AuthenticationOptions {
    */
   windowsShell?: 'cmd' | 'powershell'
   /**
+   * League of Legends installation path. Use this when the automatic discovery
+   * fails (e.g. custom install location). Passed directly to findLeagueInstall.
+   *
+   * Example: 'D:\\Games\\League of Legends'
+   */
+  leagueInstallPath?: string
+  /**
    * Debug mode. Prints error information to console.
    * @internal
    */
@@ -115,6 +122,16 @@ export class ClientElevatedPermsError extends Error {
   }
 }
 
+/**
+ * Indicates that the League Client installation path could not be found.
+ * Pass `leagueInstallPath` in AuthenticationOptions to resolve this.
+ */
+export class ClientInstallNotFoundError extends Error {
+  constructor() {
+    super('League Client installation path could not be located')
+  }
+}
+
 export class ClientAuthTimeoutError extends Error {
   public pid: number;
   public processList: string[];
@@ -127,22 +144,6 @@ export class ClientAuthTimeoutError extends Error {
   }
 }
 
-async function authenticateFromLockfile(options?: AuthenticationOptions): Promise<Credentials> {
-  const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL
-  const auth = await waitForLockfileAuth(pollInterval)
-
-  const unsafe = options?.unsafe === true
-  const hasCert = options?.certificate !== undefined
-
-  const certificate = hasCert ? options!.certificate : unsafe ? undefined : RIOT_GAMES_CERT
-
-  return {
-    port: auth.port,
-    pid: -1,
-    password: auth.password,
-    certificate
-  }
-}
 
 /**
  * Locates a League Client and retrieves the credentials for the LCU API
@@ -227,9 +228,28 @@ export async function authenticate(options?: AuthenticationOptions): Promise<Cre
       const realPid = await getProcessId(name)
 
       if (isElevated || realPid !== -1) {
-        const credentials = await authenticateFromLockfile(options)
-        credentials.pid = realPid
-        return credentials
+        // 디렉토리 자체를 못 찾으면 → 설치 경로 미상 (재시도해도 의미 없음)
+        const installDir = findLeagueInstallDir(options?.leagueInstallPath)
+        if (!installDir) {
+          throw new ClientInstallNotFoundError()
+        }
+
+        // 디렉토리는 찾았지만 lockfile 없음 → 부팅 중 (재시도 대상)
+        const install = findLeagueInstall(options?.leagueInstallPath)
+        if (!install) {
+          throw new ClientNotFoundError()
+        }
+
+        const auth = readLockfile(install.lockfile)
+        if (!auth) {
+          throw new ClientNotFoundError()
+        }
+
+        const unsafe = options?.unsafe === true
+        const hasCert = options?.certificate !== undefined
+        const certificate = hasCert ? options!.certificate : unsafe ? undefined : RIOT_GAMES_CERT
+
+        return { port: auth.port, pid: realPid, password: auth.password, certificate }
       }
 
       throw new ClientNotFoundError()
@@ -249,6 +269,20 @@ if (options?.awaitConnection) {
           const credentials = await tryAuthenticateInternal();
           resolve(credentials);
         } catch (err) {
+          // ClientInstallNotFoundError는 재시도해도 의미 없음 → 즉시 reject
+          if (err instanceof ClientInstallNotFoundError) {
+            reject(err)
+            return
+          }
+
+          // ClientElevatedPermsError / ClientNotFoundError → 경로는 알지만 아직 준비 안 됨 (부팅 중 등)
+          // 카운터 리셋 후 재시도
+          if (err instanceof ClientElevatedPermsError || err instanceof ClientNotFoundError) {
+            retryCountWithPid = 0;
+            setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+            return;
+          }
+
           retryCountWithPid++;
 
           if (retryCountWithPid >= MAX_AUTH_RETRIES) {
