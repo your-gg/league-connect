@@ -16,7 +16,8 @@ export {
   ConnectionOptions,
   LeagueWebSocket,
   EventResponse,
-  EventCallback
+  EventCallback,
+  WsConnectionRefusedError
 } from './websocket.js'
 export { DEPRECATED_request, DEPRECATED_RequestOptions, DEPRECATED_Response } from './request_deprecated.js'
 export { DEPRECATED_connect } from './websocket_deprecated.js'

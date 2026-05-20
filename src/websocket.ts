@@ -1,7 +1,19 @@
 import https from 'https'
 import WebSocket, { ClientOptions } from 'ws'
-import { authenticate, AuthenticationOptions } from './authentication.js'
+import { authenticate, AuthenticationOptions, type Credentials } from './authentication.js'
 import { trim } from './trim.js'
+
+/**
+ * Indicates that the WebSocket handshake failed with ECONNREFUSED
+ * after exhausting retries. Typically means the LCU process is starting
+ * but the WebSocket server is not yet listening on the port.
+ */
+export class WsConnectionRefusedError extends Error {
+  constructor(public readonly retries: number) {
+    super(`Could not connect to LCU WebSocket API after ${retries} retries`)
+    this.name = 'WsConnectionRefusedError'
+  }
+}
 
 export interface EventResponse<T = any> {
   /**
@@ -26,9 +38,11 @@ export type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) =
  */
 export class LeagueWebSocket extends WebSocket {
   subscriptions: Map<string, EventCallback[]> = new Map()
+  readonly credentials: Credentials
 
-  constructor(address: string, options: ClientOptions) {
+  constructor(address: string, options: ClientOptions, credentials: Credentials) {
     super(address, options)
+    this.credentials = credentials
 
     // Subscribe to Json API
     this.on('open', () => {
@@ -113,28 +127,39 @@ export interface ConnectionOptions {
  * Creates a WebSocket connection to the League Client
  * @param {ConnectionOptions} [options] Options that will be used to authenticate to the League Client
  *
- * @throws Error If the connection fails due to ECONNREFUSED
+ * @throws WsConnectionRefusedError If the WebSocket handshake fails with ECONNREFUSED after exhausting retries
  * @throws WebSocket.ErrorEvent If the connection fails for any other reason
+ *
+ * Authentication step (see {@link authenticate}) may also throw:
+ * @throws InvalidPlatformError On unsupported platforms
+ * @throws ClientNotFoundError If the League Client process is not running and `awaitConnection` is false
+ * @throws ClientElevatedPermsError If the League Client is running with elevated permissions
+ * @throws ClientInstallNotFoundError If the League Client install directory cannot be located (lockfile path)
+ * @throws ClientAuthTimeoutError If awaiting the client times out
  */
 export async function createWebSocketConnection(options: ConnectionOptions = {}): Promise<LeagueWebSocket> {
   const credentials = await authenticate(options.authenticationOptions)
   const url = `wss://riot:${credentials.password}@127.0.0.1:${credentials.port}`
 
   return await new Promise((resolve, reject) => {
-    const ws = new LeagueWebSocket(url, {
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(`riot:${credentials.password}`).toString('base64')
+    const ws = new LeagueWebSocket(
+      url,
+      {
+        headers: {
+          Authorization: 'Basic ' + Buffer.from(`riot:${credentials.password}`).toString('base64')
+        },
+        agent: new https.Agent(
+          typeof credentials?.certificate === 'undefined'
+            ? {
+                rejectUnauthorized: false
+              }
+            : {
+                ca: credentials?.certificate
+              }
+        )
       },
-      agent: new https.Agent(
-        typeof credentials?.certificate === 'undefined'
-          ? {
-              rejectUnauthorized: false
-            }
-          : {
-              ca: credentials?.certificate
-            }
-      )
-    })
+      credentials
+    )
 
     // Handle connection errors
     const errorHandler = (ws.onerror = (err) => {
@@ -149,7 +174,9 @@ export async function createWebSocketConnection(options: ConnectionOptions = {})
         options.__internalMockCallback?.()
       }
 
-      // Close the connection if it's still open to make sure there's no memory leak.
+      // Detach listeners and close the socket regardless of why the error fired.
+      // removeAllListeners() runs before close() so any deferred 'close' callbacks don't fire.
+      ws.removeAllListeners()
       ws.close()
 
       // Check if the error is a connection refused error. This is thrown when the LCU is starting but not completely ready yet.
@@ -158,9 +185,9 @@ export async function createWebSocketConnection(options: ConnectionOptions = {})
 
         // Check if the maximum number of retries has been reached and reject the promise if it has
         if (options.maxRetries === 0) {
-          reject(new Error('Could not connect to LCU WebSocket API'))
+          reject(new WsConnectionRefusedError(0))
         } else if (options.maxRetries > 0 && options.__internalRetryCount > options.maxRetries) {
-          reject(new Error(`Could not connect to LCU WebSocket API after ${options.__internalRetryCount - 1} retries`))
+          reject(new WsConnectionRefusedError(options.__internalRetryCount - 1))
         } else {
           // Wait for the poll interval and try again
           setTimeout(() => {
