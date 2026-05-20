@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Usage: npm run release -- v1.0.0
- *        npm run release -- 1.0.0
+ * Usage: npm run release -- v1.0.5
+ *        npm run release -- 1.0.5
  *
  * 사전 조건:
  *   - package.json 버전을 릴리즈 버전으로 미리 올리고 PR 머지까지 완료
- *   - master 브랜치에서 실행
+ *   - stable: master 브랜치 / beta: master 제외 브랜치(feat/* 포함)
  *
  * 스크립트 동작:
  *   - 각종 유효성 검사 후 git tag 생성 및 push → CI publish 트리거
@@ -40,7 +40,7 @@ function gitOut(cmd) {
 
 const raw = process.argv[2]
 if (!raw) {
-  console.error('usage: npm run release -- <version>\n  example: npm run release -- v1.0.0')
+  console.error('usage: npm run release -- <version>\n  example: npm run release -- v1.0.5')
   process.exit(1)
 }
 
@@ -63,23 +63,38 @@ if (!semverRe.test(ver)) {
   process.exit(1)
 }
 
-// 2. master 브랜치에서만 릴리즈 가능
+// 2. 브랜치별 릴리즈 규칙
+//    latest (1.1.0)  → master만
+//    beta  (1.1.0-x) → master 제외한 모든 브랜치
 const currentBranch = gitOut('git rev-parse --abbrev-ref HEAD')
-if (currentBranch !== 'master') {
-  console.error(`error: releases must be made from master branch (current: ${currentBranch})`)
+const isBeta = ver.includes('-')
+
+if (!isBeta && currentBranch !== 'master') {
+  console.error(
+    `error: latest releases must be made from master branch (current: ${currentBranch})\n` +
+    `       use a pre-release version (e.g. ${ver}-beta.1) to release from this branch.`
+  )
   process.exit(1)
 }
 
-// 3. origin/master 동기화 체크
+if (isBeta && currentBranch === 'master') {
+  console.error(
+    `error: beta releases are not allowed from master branch\n` +
+    `       bump to a stable version (e.g. ${ver.replace(/-.*/, '')}) or release from a feature branch.`
+  )
+  process.exit(1)
+}
+
+// 3. origin/<currentBranch> 동기화 체크
 console.log('Fetching origin...')
 run('git fetch origin')
 const localRef = gitOut('git rev-parse HEAD')
-const remoteRef = gitOut('git rev-parse origin/master')
-if (localRef !== remoteRef) {
-  const behind = gitOut('git rev-list --count HEAD..origin/master')
-  const ahead = gitOut('git rev-list --count origin/master..HEAD')
+const remoteRef = gitOut(`git rev-parse origin/${currentBranch}`)
+if (remoteRef && localRef !== remoteRef) {
+  const behind = gitOut(`git rev-list --count HEAD..origin/${currentBranch}`)
+  const ahead = gitOut(`git rev-list --count origin/${currentBranch}..HEAD`)
   console.error(
-    `error: local master is out of sync with origin/master (ahead: ${ahead}, behind: ${behind})\n` +
+    `error: local ${currentBranch} is out of sync with origin/${currentBranch} (ahead: ${ahead}, behind: ${behind})\n` +
     `       run "git pull" to sync before releasing.`
   )
   process.exit(1)
@@ -131,4 +146,4 @@ try {
   process.exit(1)
 }
 
-console.log(`Pushed ${tag} — CI should publish to GitHub Packages.`)
+console.log(`Pushed ${tag} — CI should build and publish to GitHub Packages.`)
