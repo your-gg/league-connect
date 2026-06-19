@@ -2,6 +2,11 @@ import fs from 'fs'
 import path from 'path'
 
 export interface LockfileAuthInfo {
+  /**
+   * lockfile에 기록된 프로세스 ID. stale lockfile 판별(생존확인)에 사용됩니다.
+   * 파싱 불가 시 NaN일 수 있으므로 사용 전 `> 0` 가드를 두세요.
+   */
+  pid: number
   port: number
   password: string
   protocol: 'http' | 'https'
@@ -68,8 +73,11 @@ function tryRootFromMetadata(): string | null {
     const fullPath = path.join(dirPath, settingsFile)
     const yaml = fs.readFileSync(fullPath, 'utf8')
 
+    // product_install_full_path는 실제 League 설치 폴더(...\League of Legends),
+    // product_install_root는 그 상위(...\Riot Games)다. lockfile은 설치 폴더에 있으므로
+    // full_path를 우선한다. (root를 먼저 잡으면 상위 폴더가 반환돼 lockfile을 못 찾는다)
     const rootMatch =
-      yaml.match(/product_install_root:\s*"?(.+?)"?\s*$/m) || yaml.match(/product_install_full_path:\s*"?(.+?)"?\s*$/m)
+      yaml.match(/product_install_full_path:\s*"?(.+?)"?\s*$/m) || yaml.match(/product_install_root:\s*"?(.+?)"?\s*$/m)
 
     if (!rootMatch) continue
 
@@ -178,6 +186,7 @@ export function readLockfile(lockfilePath: string): LockfileAuthInfo | null {
     const parts = raw.split(':')
     if (parts.length < 5) return null
 
+    const pidStr = parts[1]
     const portStr = parts[2]
     const password = parts[3]
     const protocol = parts[4] as 'http' | 'https'
@@ -185,7 +194,10 @@ export function readLockfile(lockfilePath: string): LockfileAuthInfo | null {
     const port = Number(portStr)
     if (!port || !password || !protocol) return null
 
-    return { port, password, protocol }
+    // pid는 best-effort(staleness 판별용). 파싱 실패해도 lockfile 자체는 유효로 본다.
+    const pid = Number(pidStr)
+
+    return { pid, port, password, protocol }
   } catch (e) {
     console.error('[league-connect] failed to read lockfile:', e)
     return null
