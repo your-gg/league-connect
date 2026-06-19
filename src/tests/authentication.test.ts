@@ -1,4 +1,23 @@
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import { authenticate, ClientInstallNotFoundError, ClientNotFoundError } from '../authentication'
+
+function makeTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'lc-auth-test-'))
+}
+
+function writeLockfile(dir: string, content: string): void {
+  fs.writeFileSync(path.join(dir, 'lockfile'), content)
+}
+
+function cleanup(dirs: string[]) {
+  for (const d of dirs) {
+    try {
+      fs.rmSync(d, { recursive: true, force: true })
+    } catch {}
+  }
+}
 
 const PLAINTEXT_CERT = `-----BEGIN CERTIFICATE-----
 MIIEIDCCAwgCCQDJC+QAdVx4UDANBgkqhkiG9w0BAQUFADCB0TELMAkGA1UEBhMC
@@ -50,6 +69,60 @@ describe('error classes', () => {
       expect(installErr).not.toBeInstanceOf(ClientNotFoundError)
       expect(notFoundErr).not.toBeInstanceOf(ClientInstallNotFoundError)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// lockfile-first detection — League 실행 불필요, PowerShell spawn 미발생
+// (leagueInstallPath를 임시 디렉토리로 지정해 파일 기반 경로만 태운다)
+// ---------------------------------------------------------------------------
+
+describe('authenticate (lockfile-first)', () => {
+  let tmpDirs: string[] = []
+
+  afterEach(() => {
+    cleanup(tmpDirs)
+    tmpDirs = []
+  })
+
+  it('throws ClientNotFoundError when install dir resolves but no lockfile (client off)', async () => {
+    const dir = makeTempDir()
+    tmpDirs.push(dir)
+    // 실제 League 설치 폴더처럼 보이도록 마커를 둔다(없으면 잘못된 dir로 보고 process 스캔으로 위임).
+    fs.writeFileSync(path.join(dir, 'LeagueClient.exe'), '')
+    // lockfile 미작성 → 클라 미실행. 마커가 있으므로 spawn-free ClientNotFoundError.
+    await expect(authenticate({ leagueInstallPath: dir })).rejects.toBeInstanceOf(ClientNotFoundError)
+  })
+
+  it('returns credentials from a valid lockfile with a live PID', async () => {
+    const dir = makeTempDir()
+    tmpDirs.push(dir)
+    // 살아 있는 PID(현재 테스트 프로세스)를 사용 → staleness 가드 통과
+    writeLockfile(dir, `LeagueClient:${process.pid}:54321:testpassword:https`)
+
+    const credentials = await authenticate({ leagueInstallPath: dir })
+    expect(credentials.port).toBe(54321)
+    expect(credentials.password).toBe('testpassword')
+    expect(credentials.pid).toBe(process.pid)
+    expect(credentials.certificate).toBeDefined()
+  })
+
+  it('certificate is undefined with unsafe: true', async () => {
+    const dir = makeTempDir()
+    tmpDirs.push(dir)
+    writeLockfile(dir, `LeagueClient:${process.pid}:54321:testpassword:https`)
+
+    const credentials = await authenticate({ leagueInstallPath: dir, unsafe: true })
+    expect(credentials.certificate).toBeUndefined()
+  })
+
+  it('throws ClientNotFoundError for a stale lockfile (dead PID)', async () => {
+    const dir = makeTempDir()
+    tmpDirs.push(dir)
+    // 실재하지 않는 PID → stale lockfile로 판정
+    writeLockfile(dir, `LeagueClient:2147483646:54321:testpassword:https`)
+
+    await expect(authenticate({ leagueInstallPath: dir })).rejects.toBeInstanceOf(ClientNotFoundError)
   })
 })
 
