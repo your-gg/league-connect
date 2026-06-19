@@ -35,6 +35,25 @@ export async function getProcessId(name: string): Promise<number> {
 }
 
 /**
+ * PID가 살아 있는지 spawn 없이 확인합니다.
+ *
+ * `process.kill(pid, 0)`은 시그널을 보내지 않고 존재 여부만 검사합니다.
+ * - 존재함            → true
+ * - 존재하지 않음(ESRCH) → false
+ * - 존재하나 권한 없음(EPERM) → true (프로세스는 살아 있음)
+ *
+ * lockfile에 적힌 PID로 stale lockfile(크래시 잔존)을 PowerShell 없이 걸러내는 데 사용합니다.
+ */
+export function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    return process.kill(pid, 0)
+  } catch (err: unknown) {
+    return (err as NodeJS.ErrnoException)?.code === 'EPERM'
+  }
+}
+
+/**
  * 현재 실행 중인 모든 프로세스 이름 목록을 가져옵니다.
  */
 export async function getAllProcessNames(): Promise<string[]> {

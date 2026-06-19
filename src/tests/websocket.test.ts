@@ -1,4 +1,4 @@
-import { createWebSocketConnection, LeagueWebSocket } from '../websocket'
+import { createWebSocketConnection, LeagueWebSocket, WsConnectionRefusedError } from '../websocket'
 
 // Test must be run with the League Client open
 describe('connecting to the client websocket', () => {
@@ -18,7 +18,8 @@ describe('connecting to the client websocket', () => {
         maxRetries
       })
     } catch (e) {
-      expect(e).toEqual(Error('Could not connect to LCU WebSocket API'))
+      expect(e).toBeInstanceOf(WsConnectionRefusedError)
+      expect((e as Error).message).toBe('Could not connect to LCU WebSocket API')
     }
     expect(__internalMockCallback).toHaveBeenCalledTimes(1)
   })
@@ -34,7 +35,8 @@ describe('connecting to the client websocket', () => {
         maxRetries
       })
     } catch (e) {
-      expect(e).toEqual(Error(`Could not connect to LCU WebSocket API after ${maxRetries} retries`))
+      expect(e).toBeInstanceOf(WsConnectionRefusedError)
+      expect((e as Error).message).toBe(`Could not connect to LCU WebSocket API after ${maxRetries} retries`)
     }
     expect(__internalMockCallback).toHaveBeenCalledTimes(maxRetries + 1)
   })

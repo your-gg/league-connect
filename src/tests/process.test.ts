@@ -1,5 +1,22 @@
-import { getAllProcessNames, isProcessRunning } from '../process';
+import { getAllProcessNames, isProcessRunning, isPidAlive } from '../process';
 import { ClientAuthTimeoutError } from '../authentication'
+
+describe('isPidAlive', () => {
+  test('현재 프로세스(process.pid)는 살아 있음', () => {
+    expect(isPidAlive(process.pid)).toBe(true)
+  })
+
+  test('존재하지 않는 PID는 false', () => {
+    // 매우 큰 PID는 실재할 가능성이 거의 없음 (stale lockfile 시뮬레이션)
+    expect(isPidAlive(2147483646)).toBe(false)
+  })
+
+  test('잘못된 PID(0/음수/NaN)는 false', () => {
+    expect(isPidAlive(0)).toBe(false)
+    expect(isPidAlive(-1)).toBe(false)
+    expect(isPidAlive(NaN)).toBe(false)
+  })
+})
 
 describe('isProcessRunning 테스트', () => {
   

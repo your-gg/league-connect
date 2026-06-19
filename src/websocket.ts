@@ -1,7 +1,33 @@
 import https from 'https'
 import WebSocket, { ClientOptions } from 'ws'
-import { authenticate, AuthenticationOptions } from './authentication.js'
+import { authenticate, AuthenticationOptions, Credentials } from './authentication.js'
 import { trim } from './trim.js'
+
+/**
+ * Indicates that the LCU WebSocket connection was refused (ECONNREFUSED) and
+ * retries (if any) were exhausted. Typically means the client is starting up,
+ * shutting down, or the lockfile is stale (port no longer listening).
+ */
+export class WsConnectionRefusedError extends Error {
+  constructor(message = 'Could not connect to LCU WebSocket API') {
+    super(message)
+    this.name = 'WsConnectionRefusedError'
+  }
+}
+
+/**
+ * Classifies a socket error message as a connection-establishment failure to the local LCU
+ * endpoint: the client is starting/closing, the lockfile is stale, or its freed port was
+ * reclaimed by another local service (a recycled-PID stale lockfile points at a foreign
+ * listener whose TLS handshake fails with ECONNRESET / protocol errors rather than
+ * ECONNREFUSED). These are retried/wrapped as {@link WsConnectionRefusedError} (which
+ * consumers treat as "keep polling"); anything else propagates raw.
+ *
+ * Exported for unit testing (not re-exported from the package root).
+ */
+export function isConnectionRefusedMessage(message: string): boolean {
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|EPROTO|ERR_SSL|wrong version number/i.test(message)
+}
 
 export interface EventResponse<T = any> {
   /**
@@ -27,6 +53,12 @@ export type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) =
 export class LeagueWebSocket extends WebSocket {
   subscriptions: Map<string, EventCallback[]> = new Map()
 
+  /**
+   * The LCU credentials this socket was opened with. Set by
+   * {@link createWebSocketConnection}. Useful for subsequent `createHttp1Request` calls.
+   */
+  credentials?: Credentials
+
   constructor(address: string, options: ClientOptions) {
     super(address, options)
 
@@ -37,17 +69,27 @@ export class LeagueWebSocket extends WebSocket {
 
     // Attach the LeagueWebSocket subscription hook
     this.on('message', (content: string) => {
-      // Attempt to parse into JSON and dispatch events
+      // 1) Parse the frame. Malformed frames are ignored.
+      let res: EventResponse | undefined
       try {
         const json = JSON.parse(content)
-        const [res]: [EventResponse] = json.slice(2)
+        res = json.slice(2)[0]
+      } catch {
+        return
+      }
+      if (!res || !this.subscriptions.has(res.uri)) return
 
-        if (this.subscriptions.has(res.uri)) {
-          this.subscriptions.get(res.uri)?.forEach((cb) => {
-            cb(res.data, res)
-          })
+      // 2) Dispatch. Each callback is isolated so one throwing subscriber neither
+      //    aborts the remaining subscribers for this uri nor is swallowed silently
+      //    together with parse errors. (No logger in this library — consumers should
+      //    handle their own errors inside the callback.)
+      for (const cb of this.subscriptions.get(res.uri)!) {
+        try {
+          cb(res.data, res)
+        } catch {
+          /* isolate subscriber error */
         }
-      } catch {}
+      }
     })
   }
 
@@ -136,6 +178,9 @@ export async function createWebSocketConnection(options: ConnectionOptions = {})
       )
     })
 
+    // Expose the credentials used so consumers can reuse them (e.g. createHttp1Request)
+    ws.credentials = credentials
+
     // Handle connection errors
     const errorHandler = (ws.onerror = (err) => {
       // Set options to default values if they are not set
@@ -152,15 +197,21 @@ export async function createWebSocketConnection(options: ConnectionOptions = {})
       // Close the connection if it's still open to make sure there's no memory leak.
       ws.close()
 
-      // Check if the error is a connection refused error. This is thrown when the LCU is starting but not completely ready yet.
-      if (err.message.includes('ECONNREFUSED')) {
+      // A connection-establishment failure means we never reached a healthy LCU (starting/
+      // closing, stale lockfile, or its freed port reclaimed by a foreign service). Retry/wrap
+      // as WsConnectionRefusedError so consumers keep polling; only unexpected errors go raw.
+      if (isConnectionRefusedMessage(err.message)) {
         options.__internalRetryCount++
 
         // Check if the maximum number of retries has been reached and reject the promise if it has
         if (options.maxRetries === 0) {
-          reject(new Error('Could not connect to LCU WebSocket API'))
+          reject(new WsConnectionRefusedError('Could not connect to LCU WebSocket API'))
         } else if (options.maxRetries > 0 && options.__internalRetryCount > options.maxRetries) {
-          reject(new Error(`Could not connect to LCU WebSocket API after ${options.__internalRetryCount - 1} retries`))
+          reject(
+            new WsConnectionRefusedError(
+              `Could not connect to LCU WebSocket API after ${options.__internalRetryCount - 1} retries`
+            )
+          )
         } else {
           // Wait for the poll interval and try again
           setTimeout(() => {

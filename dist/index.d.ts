@@ -1,9 +1,11 @@
-import { EventEmitter } from 'events';
 import { IncomingMessage } from 'http';
-import http2, { IncomingHttpHeaders, IncomingHttpStatusHeader } from 'http2';
 import WebSocket, { ClientOptions } from 'ws';
-import { Response } from 'node-fetch';
 
+/**
+ * install-dir 해석 캐시를 무효화합니다. 클라 종료/연결 해제 시 호출하면
+ * 다음 연결에서 경로를 다시 해석합니다. (경로 자체는 보통 불변이라 호출은 선택적입니다.)
+ */
+declare function clearInstallDirCache(): void;
 interface Credentials {
     /**
      * The system port the LCU API is running on
@@ -74,6 +76,13 @@ interface AuthenticationOptions {
      * Default: 'powershell'
      */
     windowsShell?: 'cmd' | 'powershell';
+    /**
+     * League of Legends installation path. Use this when the automatic discovery
+     * fails (e.g. custom install location). Passed directly to findLeagueInstall.
+     *
+     * Example: 'D:\\Games\\League of Legends'
+     */
+    leagueInstallPath?: string;
 }
 /**
  * Indicates that the application does not run on an environment that the
@@ -94,6 +103,13 @@ declare class ClientNotFoundError extends Error {
 declare class ClientElevatedPermsError extends Error {
     constructor();
 }
+/**
+ * Indicates that the League Client installation path could not be found.
+ * Pass `leagueInstallPath` in AuthenticationOptions to resolve this.
+ */
+declare class ClientInstallNotFoundError extends Error {
+    constructor();
+}
 declare class ClientAuthTimeoutError extends Error {
     pid: number;
     processList: string[];
@@ -103,6 +119,15 @@ declare class ClientAuthTimeoutError extends Error {
  * Locates a League Client and retrieves the credentials for the LCU API
  * from the found process
  *
+ * Detection strategy (idle-resource optimized):
+ *   1. Resolve the install directory (cached, fully file-based — no PowerShell).
+ *   2. If resolved, check for the `lockfile`; absent ⇒ ClientNotFoundError ("not running").
+ *   3. If present, read it (no PowerShell) and guard against a stale lockfile via the PID.
+ *   4. Only when the install dir cannot be resolved (or the lockfile is unreadable, e.g.
+ *      an elevated client) do we fall back to the legacy process-command-line scan.
+ *
+ * This means that, while the client is off, an installed League incurs ~0 process spawns.
+ *
  * If options.awaitConnection is false the promise will resolve into a
  * rejection if a League Client is not running
  *
@@ -111,41 +136,13 @@ declare class ClientAuthTimeoutError extends Error {
  * @throws InvalidPlatformError If the environment is not running
  * windows/linux/darwin
  * @throws ClientNotFoundError If the League Client could not be found
+ * @throws ClientInstallNotFoundError If the install directory could not be located
  * @throws ClientElevatedPermsError If the League Client is running as administrator and the script is not (Windows only)
  */
 declare function authenticate(options?: AuthenticationOptions): Promise<Credentials>;
 
-interface LeagueClientOptions {
-    /**
-     * The time duration in milliseconds between each check for a client
-     * disconnect
-     *
-     * Default: 2500
-     */
-    pollInterval: number;
-}
-declare interface LeagueClient {
-    on(event: 'connect', callback: (credentials: Credentials) => void): this;
-    on(event: 'disconnect', callback: () => void): this;
-}
-declare class LeagueClient extends EventEmitter {
-    options?: LeagueClientOptions | undefined;
-    private isListening;
-    credentials?: Credentials;
-    constructor(credentials: Credentials, options?: LeagueClientOptions | undefined);
-    /**
-     * Start listening for League Client processes
-     */
-    start(): void;
-    /**
-     * Stop listening for client stop/start
-     */
-    stop(): void;
-    private onTick;
-}
-
-type HeaderPair = [string, string];
-type JsonObjectLike = Record<string, unknown>;
+declare type HeaderPair = [string, string];
+declare type JsonObjectLike = Record<string, unknown>;
 interface HttpResponse {
     readonly ok: boolean;
     /** Was the request redirected at some point? */
@@ -191,26 +188,13 @@ declare class Http1Response implements HttpResponse {
 declare function createHttp1Request<T>(options: HttpRequestOptions<T>, credentials: Credentials): Promise<Http1Response>;
 
 /**
- * Create a HTTP/2.0 client session.
- *
- * This invocation requires the credentials to have
+ * Indicates that the LCU WebSocket connection was refused (ECONNREFUSED) and
+ * retries (if any) were exhausted. Typically means the client is starting up,
+ * shutting down, or the lockfile is stale (port no longer listening).
  */
-declare function createHttpSession(credentials: Credentials): Promise<http2.ClientHttp2Session>;
-declare class Http2Response implements HttpResponse {
-    private _headers;
-    private _stream;
-    private _raw;
-    readonly ok: boolean;
-    readonly redirected: boolean;
-    readonly status: number;
-    constructor(_headers: IncomingHttpHeaders & IncomingHttpStatusHeader, _stream: http2.ClientHttp2Stream, _raw: Buffer);
-    json<T = JsonObjectLike>(): T;
-    text(): string;
-    buffer(): Buffer;
-    headers(): HeaderPair[];
+declare class WsConnectionRefusedError extends Error {
+    constructor(message?: string);
 }
-declare function createHttp2Request<T>(options: HttpRequestOptions<T>, session: http2.ClientHttp2Session, credentials: Credentials): Promise<Http2Response>;
-
 interface EventResponse<T = any> {
     /**
      * The uri this event was dispatched at
@@ -226,12 +210,17 @@ interface EventResponse<T = any> {
  *
  * @param data The data payload (deserialized json)
  */
-type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) => void;
+declare type EventCallback<T = any> = (data: T | null, event: EventResponse<T>) => void;
 /**
  * WebSocket extension
  */
 declare class LeagueWebSocket extends WebSocket {
     subscriptions: Map<string, EventCallback[]>;
+    /**
+     * The LCU credentials this socket was opened with. Set by
+     * {@link createWebSocketConnection}. Useful for subsequent `createHttp1Request` calls.
+     */
+    credentials?: Credentials;
     constructor(address: string, options: ClientOptions);
     subscribe<T extends any = any>(path: string, effect: EventCallback<T>): void;
     unsubscribe(path: string): void;
@@ -264,35 +253,4 @@ interface ConnectionOptions {
  */
 declare function createWebSocketConnection(options?: ConnectionOptions): Promise<LeagueWebSocket>;
 
-interface DEPRECATED_RequestOptions<T = any> {
-    /**
-     * Relative URL (relative to LCU API base url) to send api request to
-     */
-    url: string;
-    /**
-     * Http verb to use for request
-     */
-    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-    /**
-     * Optionally a body to pass to PUT/PATCH/POST/DELETE. This is typically
-     * an object type as the library will parse this into JSON and send along
-     * with the request
-     */
-    body?: T;
-}
-/**
- * Wrapper around Node-fetch Response which will deserialize JSON into the
- * proper type
- */
-declare class DEPRECATED_Response<T> extends Response {
-    constructor(parent: Response);
-    /**
-     * Deserialize the response body into T
-     */
-    json(): Promise<T>;
-}
-declare function DEPRECATED_request<T = any, R = any>(options: DEPRECATED_RequestOptions<T>, credentials?: Credentials): Promise<DEPRECATED_Response<R>>;
-
-declare function DEPRECATED_connect(credentials: Credentials): Promise<LeagueWebSocket>;
-
-export { AuthenticationOptions, ClientAuthTimeoutError, ClientElevatedPermsError, ClientNotFoundError, ConnectionOptions, Credentials, DEPRECATED_RequestOptions, DEPRECATED_Response, DEPRECATED_connect, DEPRECATED_request, EventCallback, EventResponse, HeaderPair, Http1Response, Http2Response, HttpRequestOptions, HttpResponse, InvalidPlatformError, JsonObjectLike, LeagueClient, LeagueClientOptions, LeagueWebSocket, authenticate, createHttp1Request, createHttp2Request, createHttpSession, createWebSocketConnection };
+export { AuthenticationOptions, ClientAuthTimeoutError, ClientElevatedPermsError, ClientInstallNotFoundError, ClientNotFoundError, ConnectionOptions, Credentials, EventCallback, EventResponse, HeaderPair, Http1Response, HttpRequestOptions, HttpResponse, InvalidPlatformError, JsonObjectLike, LeagueWebSocket, WsConnectionRefusedError, authenticate, clearInstallDirCache, createHttp1Request, createWebSocketConnection };
