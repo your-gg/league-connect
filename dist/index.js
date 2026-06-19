@@ -1,6 +1,8 @@
 // src/authentication.ts
 import cp2 from "child_process";
 import util2 from "util";
+import fs2 from "fs";
+import path2 from "path";
 
 // src/process.ts
 import cp from "child_process";
@@ -20,6 +22,15 @@ async function getProcessId(name) {
     return isNaN(pid) ? -1 : pid;
   } catch {
     return -1;
+  }
+}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    return process.kill(pid, 0);
+  } catch (err) {
+    return (err == null ? void 0 : err.code) === "EPERM";
   }
 }
 async function getAllProcessNames() {
@@ -79,18 +90,18 @@ function fileExists(p) {
     return false;
   }
 }
-function tryFromEnv() {
+function tryRootFromPath(installPath) {
+  const root = path.resolve(installPath);
+  return fileExists(root) ? root : null;
+}
+function tryRootFromEnv() {
   const envPath = process.env.LEAGUE_INSTALL_PATH;
   if (!envPath)
     return null;
   const root = path.resolve(envPath);
-  const lockfile = path.join(root, "lockfile");
-  if (fileExists(lockfile)) {
-    return { root, lockfile };
-  }
-  return null;
+  return fileExists(root) ? root : null;
 }
-function tryFromMetadata() {
+function tryRootFromMetadata() {
   const programData = getProgramDataDir();
   const metadataRoot = path.join(programData, "Riot Games", "Metadata");
   if (!fileExists(metadataRoot))
@@ -108,21 +119,19 @@ function tryFromMetadata() {
       continue;
     const fullPath = path.join(dirPath, settingsFile);
     const yaml = fs.readFileSync(fullPath, "utf8");
-    const rootMatch = yaml.match(/product_install_root:\s*"?(.+?)"?\s*$/m) || yaml.match(/product_install_full_path:\s*"?(.+?)"?\s*$/m);
+    const rootMatch = yaml.match(/product_install_full_path:\s*"?(.+?)"?\s*$/m) || yaml.match(/product_install_root:\s*"?(.+?)"?\s*$/m);
     if (!rootMatch)
       continue;
     let root = rootMatch[1].trim();
     if (root.toLowerCase().endsWith(".exe")) {
       root = path.dirname(root);
     }
-    const lockfile = path.join(root, "lockfile");
-    if (fileExists(lockfile)) {
-      return { root, lockfile };
-    }
+    if (fileExists(root))
+      return root;
   }
   return null;
 }
-function tryFromRiotClientInstalls() {
+function tryRootFromRiotClientInstalls() {
   const programData = getProgramDataDir();
   const installsPath = path.join(programData, "Riot Games", "RiotClientInstalls.json");
   if (!fileExists(installsPath))
@@ -130,50 +139,39 @@ function tryFromRiotClientInstalls() {
   try {
     const raw = fs.readFileSync(installsPath, "utf8");
     const json = JSON.parse(raw);
-    const values = Object.values(json);
-    const anyPath = values.find((p) => {
-      if (typeof p === "string") {
-        return p.toLowerCase().includes("riotclientservices.exe");
+    if (json.associated_client && typeof json.associated_client === "object") {
+      for (const lolPath of Object.keys(json.associated_client)) {
+        const lolRoot2 = path.normalize(lolPath);
+        if (fileExists(lolRoot2))
+          return lolRoot2;
       }
-      return false;
-    });
+    }
+    const values = Object.values(json).filter((p) => typeof p === "string");
+    const anyPath = values.find((p) => p.toLowerCase().includes("riotclientservices.exe"));
     if (!anyPath)
       return null;
     const riotClientDir = path.dirname(anyPath);
     const riotRoot = path.resolve(riotClientDir, "..");
     const lolRoot = path.join(riotRoot, "League of Legends");
-    const lockfile = path.join(lolRoot, "lockfile");
-    if (fileExists(lockfile)) {
-      return { root: lolRoot, lockfile };
-    }
+    if (fileExists(lolRoot))
+      return lolRoot;
   } catch (e) {
     console.error("[league-connect] failed to parse RiotClientInstalls.json", e);
     return null;
   }
   return null;
 }
-function tryDefaultPath() {
+function tryDefaultRoot() {
   const root = "C:\\Riot Games\\League of Legends";
-  const lockfile = path.join(root, "lockfile");
-  if (fileExists(lockfile)) {
-    return { root, lockfile };
-  }
-  return null;
+  return fileExists(root) ? root : null;
 }
-function findLeagueInstall() {
-  const fromEnv = tryFromEnv();
-  if (fromEnv)
-    return fromEnv;
-  const fromMetadata = tryFromMetadata();
-  if (fromMetadata)
-    return fromMetadata;
-  const fromInstalls = tryFromRiotClientInstalls();
-  if (fromInstalls)
-    return fromInstalls;
-  const fromDefault = tryDefaultPath();
-  if (fromDefault)
-    return fromDefault;
-  return null;
+function findLeagueInstallDir(installPath) {
+  if (installPath) {
+    const root = tryRootFromPath(installPath);
+    if (root)
+      return root;
+  }
+  return tryRootFromEnv() ?? tryRootFromMetadata() ?? tryRootFromRiotClientInstalls() ?? tryDefaultRoot();
 }
 function readLockfile(lockfilePath) {
   try {
@@ -181,28 +179,18 @@ function readLockfile(lockfilePath) {
     const parts = raw.split(":");
     if (parts.length < 5)
       return null;
+    const pidStr = parts[1];
     const portStr = parts[2];
     const password = parts[3];
     const protocol = parts[4];
     const port = Number(portStr);
     if (!port || !password || !protocol)
       return null;
-    return { port, password, protocol };
+    const pid = Number(pidStr);
+    return { pid, port, password, protocol };
   } catch (e) {
     console.error("[league-connect] failed to read lockfile:", e);
     return null;
-  }
-}
-async function waitForLockfileAuth(pollIntervalMs = 2500) {
-  while (true) {
-    const install = findLeagueInstall();
-    if (install) {
-      const auth = readLockfile(install.lockfile);
-      if (auth) {
-        return auth;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 }
 
@@ -210,6 +198,18 @@ async function waitForLockfileAuth(pollIntervalMs = 2500) {
 var exec2 = util2.promisify(cp2.exec);
 var DEFAULT_NAME = "LeagueClientUx";
 var DEFAULT_POLL_INTERVAL = 2500;
+var cachedInstallDir = null;
+function resolveInstallDir(installPath) {
+  if (installPath)
+    return findLeagueInstallDir(installPath);
+  if (cachedInstallDir && fs2.existsSync(cachedInstallDir))
+    return cachedInstallDir;
+  cachedInstallDir = findLeagueInstallDir();
+  return cachedInstallDir;
+}
+function clearInstallDirCache() {
+  cachedInstallDir = null;
+}
 var InvalidPlatformError = class extends Error {
   constructor() {
     super("process runs on platform client does not support");
@@ -225,6 +225,11 @@ var ClientElevatedPermsError = class extends Error {
     super("League Client has been detected but is running as administrator");
   }
 };
+var ClientInstallNotFoundError = class extends Error {
+  constructor() {
+    super("League Client installation path could not be located");
+  }
+};
 var ClientAuthTimeoutError = class extends Error {
   pid;
   processList;
@@ -235,168 +240,140 @@ var ClientAuthTimeoutError = class extends Error {
     this.processList = processList;
   }
 };
-async function authenticateFromLockfile(options) {
-  const pollInterval = options?.pollInterval ?? DEFAULT_POLL_INTERVAL;
-  const auth = await waitForLockfileAuth(pollInterval);
-  const unsafe = options?.unsafe === true;
-  const hasCert = options?.certificate !== void 0;
-  const certificate = hasCert ? options.certificate : unsafe ? void 0 : RIOT_GAMES_CERT;
-  return {
-    port: auth.port,
-    pid: -1,
-    password: auth.password,
-    certificate
-  };
-}
 async function authenticate(options) {
   const portRegex = /--app-port=([0-9]+)(?= *"| --)/;
   const passwordRegex = /--remoting-auth-token=(.+?)(?= *"| --)/;
   const pidRegex = /--app-pid=([0-9]+)(?= *"| --)/;
-  const name = options?.name ?? DEFAULT_NAME;
+  const name = (options == null ? void 0 : options.name) ?? DEFAULT_NAME;
   const isWindows = process.platform === "win32";
-  const executionOptions = isWindows ? { shell: options?.windowsShell ?? "powershell" } : {};
-  let retryCountWithPid = 0;
+  const executionOptions = isWindows ? { shell: (options == null ? void 0 : options.windowsShell) ?? "powershell" } : {};
+  let retryCount = 0;
   const MAX_AUTH_RETRIES = 5;
   if (!["win32", "linux", "darwin"].includes(process.platform)) {
     throw new InvalidPlatformError();
   }
-  async function tryAuthenticateInternal() {
+  function selectCertificate() {
+    const unsafe = (options == null ? void 0 : options.unsafe) === true;
+    const hasCert = (options == null ? void 0 : options.certificate) !== void 0;
+    return hasCert ? options.certificate : unsafe ? void 0 : RIOT_GAMES_CERT;
+  }
+  function tryLockfileFirst() {
+    if (name !== DEFAULT_NAME)
+      return null;
+    const installDir = resolveInstallDir(options == null ? void 0 : options.leagueInstallPath);
+    if (!installDir)
+      return null;
+    const lockfilePath = path2.join(installDir, "lockfile");
+    if (!fs2.existsSync(lockfilePath)) {
+      if (isWindows && !fs2.existsSync(path2.join(installDir, "LeagueClient.exe"))) {
+        return null;
+      }
+      throw new ClientNotFoundError();
+    }
+    const auth = readLockfile(lockfilePath);
+    if (!auth)
+      return null;
+    if (!Number.isInteger(auth.pid) || auth.pid <= 0) {
+      return null;
+    }
+    if (!isPidAlive(auth.pid)) {
+      throw new ClientNotFoundError();
+    }
+    return {
+      port: auth.port,
+      pid: auth.pid,
+      password: auth.password,
+      certificate: selectCertificate()
+    };
+  }
+  async function tryProcessCmdlineScan() {
     try {
       let command;
       if (!isWindows) {
         command = `ps x -o args | grep '${name}'`;
-      } else if (options?.useDeprecatedWmic === true) {
+      } else if ((options == null ? void 0 : options.useDeprecatedWmic) === true) {
         command = `wmic process where "caption='${name}.exe'" get commandline`;
       } else {
         command = `Get-CimInstance -Query "SELECT * from Win32_Process WHERE name LIKE '${name}.exe'" | Select-Object -ExpandProperty CommandLine`;
       }
       const { stdout: rawStdout } = await exec2(command, executionOptions);
       const stdout = rawStdout.replace(/\n|\r/g, "");
-      const [, port] = stdout.match(portRegex);
-      const [, password] = stdout.match(passwordRegex);
-      const [, pid] = stdout.match(pidRegex);
-      const unsafe = options?.unsafe === true;
-      const hasCert = options?.certificate !== void 0;
-      const certificate = hasCert ? options.certificate : (
-        // Otherwise: does the user want unsafe requests?
-        unsafe ? void 0 : (
-          // Didn't specify, use our own certificate
-          RIOT_GAMES_CERT
-        )
-      );
+      const portMatch = stdout.match(portRegex);
+      const passwordMatch = stdout.match(passwordRegex);
+      const pidMatch = stdout.match(pidRegex);
+      if (!portMatch || !passwordMatch || !pidMatch) {
+        throw new ClientNotFoundError();
+      }
       return {
-        port: Number(port),
-        pid: Number(pid),
-        password,
-        certificate
+        port: Number(portMatch[1]),
+        pid: Number(pidMatch[1]),
+        password: passwordMatch[1],
+        certificate: selectCertificate()
       };
     } catch (err) {
-      if (options?.__internalDebug)
+      if (options == null ? void 0 : options.__internalDebug)
         console.error(err);
       let isElevated = false;
-      if (isWindows && (options?.windowsShell ?? "powershell") === "powershell") {
-        const { stdout: adminCheck } = await exec2(
-          `if ((Get-Process -Name ${name} -ErrorAction SilentlyContinue | Where-Object {!$_.Handle -and !$_.Path})) {Write-Output "True"} else {Write-Output "False"}`,
-          { shell: "powershell" }
-        );
-        isElevated = adminCheck.includes("True");
+      if (isWindows && ((options == null ? void 0 : options.windowsShell) ?? "powershell") === "powershell") {
+        try {
+          const { stdout: adminCheck } = await exec2(`if ((Get-Process -Name ${name} -ErrorAction SilentlyContinue | Where-Object {!$_.Handle -and !$_.Path})) {Write-Output "True"} else {Write-Output "False"}`, { shell: "powershell" });
+          isElevated = adminCheck.includes("True");
+        } catch {
+          isElevated = false;
+        }
       }
       const realPid = await getProcessId(name);
       if (isElevated || realPid !== -1) {
-        const credentials = await authenticateFromLockfile(options);
-        credentials.pid = realPid;
-        return credentials;
+        const installDir = findLeagueInstallDir(options == null ? void 0 : options.leagueInstallPath);
+        if (installDir) {
+          const lockfilePath = path2.join(installDir, "lockfile");
+          if (fs2.existsSync(lockfilePath)) {
+            const auth = readLockfile(lockfilePath);
+            if (auth) {
+              return { port: auth.port, pid: realPid, password: auth.password, certificate: selectCertificate() };
+            }
+          }
+        }
+        if (isElevated) {
+          throw new ClientElevatedPermsError();
+        }
+        if (!installDir) {
+          throw new ClientInstallNotFoundError();
+        }
+        throw new ClientNotFoundError();
       }
       throw new ClientNotFoundError();
     }
   }
-  if (options?.awaitConnection) {
+  async function tryAuthenticateInternal() {
+    const fast = tryLockfileFirst();
+    if (fast)
+      return fast;
+    return tryProcessCmdlineScan();
+  }
+  if (options == null ? void 0 : options.awaitConnection) {
     return new Promise(function self(resolve, reject) {
-      getProcessId(name).then(async (pid) => {
-        if (pid === -1) {
-          retryCountWithPid = 0;
-          setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
+      tryAuthenticateInternal().then(resolve).catch(async (err) => {
+        if (err instanceof ClientInstallNotFoundError) {
+          reject(err);
           return;
         }
-        try {
-          const credentials = await tryAuthenticateInternal();
-          resolve(credentials);
-        } catch (err) {
-          retryCountWithPid++;
-          if (retryCountWithPid >= MAX_AUTH_RETRIES) {
-            const allProcesses = await getAllProcessNames();
-            reject(new ClientAuthTimeoutError(pid, MAX_AUTH_RETRIES, allProcesses));
-          } else {
-            setTimeout(() => self(resolve, reject), options?.pollInterval ?? DEFAULT_POLL_INTERVAL);
-          }
+        if (err instanceof ClientNotFoundError || err instanceof ClientElevatedPermsError) {
+          retryCount = 0;
+          setTimeout(() => self(resolve, reject), (options == null ? void 0 : options.pollInterval) ?? DEFAULT_POLL_INTERVAL);
+          return;
+        }
+        retryCount++;
+        if (retryCount >= MAX_AUTH_RETRIES) {
+          const allProcesses = await getAllProcessNames();
+          reject(new ClientAuthTimeoutError(-1, MAX_AUTH_RETRIES, allProcesses));
+        } else {
+          setTimeout(() => self(resolve, reject), (options == null ? void 0 : options.pollInterval) ?? DEFAULT_POLL_INTERVAL);
         }
       });
     });
   }
   return tryAuthenticateInternal();
-}
-
-// src/client.ts
-import { EventEmitter } from "events";
-var DEFAULT_POLL_INTERVAL2 = 2500;
-var LeagueClient = class extends EventEmitter {
-  constructor(credentials, options) {
-    super();
-    this.options = options;
-    this.credentials = credentials;
-  }
-  isListening = false;
-  credentials = void 0;
-  /**
-   * Start listening for League Client processes
-   */
-  start() {
-    if (!this.isListening) {
-      this.isListening = true;
-      if (this.credentials === void 0 || !processExists(this.credentials.pid)) {
-        throw new ClientNotFoundError();
-      }
-      this.onTick();
-    }
-  }
-  /**
-   * Stop listening for client stop/start
-   */
-  stop() {
-    this.isListening = false;
-  }
-  async onTick() {
-    if (this.isListening) {
-      if (this.credentials !== void 0) {
-        if (!processExists(this.credentials.pid)) {
-          this.emit("disconnect");
-          this.credentials = void 0;
-          this.onTick();
-        } else {
-          setTimeout(() => {
-            this.onTick();
-          }, this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2);
-        }
-      } else {
-        const credentials = await authenticate({
-          awaitConnection: true,
-          pollInterval: this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2
-        });
-        this.credentials = credentials;
-        this.emit("connect", credentials);
-        setTimeout(() => {
-          this.onTick();
-        }, this.options?.pollInterval ?? DEFAULT_POLL_INTERVAL2);
-      }
-    }
-  }
-};
-function processExists(pid) {
-  try {
-    return process.kill(pid, 0);
-  } catch (err) {
-    return err?.code === "EPERM";
-  }
 }
 
 // src/http.ts
@@ -456,31 +433,28 @@ var Http1Response = class {
 async function createHttp1Request(options, credentials) {
   const agentOptions = credentials.certificate === void 0 ? { rejectUnauthorized: false } : { ca: credentials.certificate };
   return new Promise((resolve, reject) => {
-    const request = https.request(
-      {
-        host: "127.0.0.1",
-        port: credentials.port,
-        path: "/" + trim(options.url),
-        method: options.method,
-        headers: {
-          Accept: "*/*",
-          "Content-Type": "application/json",
-          Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
-        },
-        agent: new https.Agent(agentOptions)
+    const request = https.request({
+      host: "127.0.0.1",
+      port: credentials.port,
+      path: "/" + trim(options.url),
+      method: options.method,
+      headers: {
+        Accept: "*/*",
+        "Content-Type": "application/json",
+        Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
       },
-      (response) => {
-        let buffer = [];
-        response.on("data", (data) => void buffer.push(data));
-        response.on("end", () => {
-          try {
-            resolve(new Http1Response(response, Buffer.concat(buffer)));
-          } catch (jsonError) {
-            reject(jsonError);
-          }
-        });
-      }
-    );
+      agent: new https.Agent(agentOptions)
+    }, (response) => {
+      let buffer = [];
+      response.on("data", (data) => void buffer.push(data));
+      response.on("end", () => {
+        try {
+          resolve(new Http1Response(response, Buffer.concat(buffer)));
+        } catch (jsonError) {
+          reject(jsonError);
+        }
+      });
+    });
     if (options.body !== void 0) {
       const data = JSON.stringify(options.body);
       const body = new TextEncoder().encode(data);
@@ -491,124 +465,55 @@ async function createHttp1Request(options, credentials) {
   });
 }
 
-// src/http2.ts
-import http2 from "http2";
-import { TextEncoder as TextEncoder2 } from "util";
-import assert2 from "assert";
-async function createHttpSession(credentials) {
-  const certificate = credentials.certificate ?? RIOT_GAMES_CERT;
-  return http2.connect(`https://127.0.0.1:${credentials.port}`, {
-    ca: certificate
-  });
-}
-var Http2Response = class {
-  constructor(_headers, _stream, _raw) {
-    this._headers = _headers;
-    this._stream = _stream;
-    this._raw = _raw;
-    assert2(_stream.closed, "Response constructor called with unclosed ClientHttp2Stream");
-    const code = _headers[":status"];
-    this.ok = code >= 200 && code < 300;
-    this.redirected = [301, 302, 303, 307, 308].includes(code);
-    this.status = code;
-  }
-  ok;
-  redirected;
-  status;
-  json() {
-    return JSON.parse(this._raw.toString());
-  }
-  text() {
-    return this._raw.toString();
-  }
-  buffer() {
-    return this._raw;
-  }
-  headers() {
-    const headers = [];
-    for (const [key, value] of Object.entries(this._headers)) {
-      if (key.startsWith(":")) {
-        continue;
-      }
-      if (value === void 0) {
-        headers.push([key, ""]);
-      } else if (Array.isArray(value)) {
-        headers.push([key, value.join(", ")]);
-      } else {
-        headers.push([key, value]);
-      }
-    }
-    return headers;
-  }
-};
-async function createHttp2Request(options, session, credentials) {
-  assert2(!session.closed, "createHttp2Request called on closed session");
-  const request = session.request({
-    ":path": "/" + trim(options.url),
-    ":method": options.method,
-    Accept: "*/*",
-    "Content-Type": "application/json",
-    Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
-  });
-  if (options.body) {
-    const data = JSON.stringify(options.body);
-    const body = new TextEncoder2().encode(data);
-    request.write(body, "utf8");
-  }
-  return new Promise((resolve, reject) => {
-    let stream = [];
-    let headers;
-    request.on("response", (response) => {
-      headers = response;
-    });
-    request.on("data", (data) => {
-      stream.push(data);
-    });
-    request.on("error", (err) => reject(err));
-    request.on("end", () => {
-      try {
-        request.close();
-        resolve(new Http2Response(headers, request, Buffer.concat(stream)));
-      } catch (jsonError) {
-        reject(jsonError);
-      }
-    });
-  });
-}
-
 // src/websocket.ts
 import https2 from "https";
 import WebSocket from "ws";
+var WsConnectionRefusedError = class extends Error {
+  constructor(message = "Could not connect to LCU WebSocket API") {
+    super(message);
+    this.name = "WsConnectionRefusedError";
+  }
+};
+function isConnectionRefusedMessage(message) {
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|EPROTO|ERR_SSL|wrong version number/i.test(message);
+}
 var LeagueWebSocket = class extends WebSocket {
   subscriptions = /* @__PURE__ */ new Map();
+  credentials;
   constructor(address, options) {
     super(address, options);
     this.on("open", () => {
       this.send(JSON.stringify([5, "OnJsonApiEvent"]));
     });
     this.on("message", (content) => {
+      let res;
       try {
         const json = JSON.parse(content);
-        const [res] = json.slice(2);
-        if (this.subscriptions.has(res.uri)) {
-          this.subscriptions.get(res.uri)?.forEach((cb) => {
-            cb(res.data, res);
-          });
-        }
+        res = json.slice(2)[0];
       } catch {
+        return;
+      }
+      if (!res || !this.subscriptions.has(res.uri))
+        return;
+      for (const cb of this.subscriptions.get(res.uri)) {
+        try {
+          cb(res.data, res);
+        } catch {
+        }
       }
     });
   }
-  subscribe(path2, effect) {
-    const p = `/${trim(path2)}`;
+  subscribe(path3, effect) {
+    var _a;
+    const p = `/${trim(path3)}`;
     if (!this.subscriptions.has(p)) {
       this.subscriptions.set(p, [effect]);
     } else {
-      this.subscriptions.get(p)?.push(effect);
+      (_a = this.subscriptions.get(p)) == null ? void 0 : _a.push(effect);
     }
   }
-  unsubscribe(path2) {
-    const p = `/${trim(path2)}`;
+  unsubscribe(path3) {
+    const p = `/${trim(path3)}`;
     this.subscriptions.delete(p);
   }
 };
@@ -620,30 +525,30 @@ async function createWebSocketConnection(options = {}) {
       headers: {
         Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
       },
-      agent: new https2.Agent(
-        typeof credentials?.certificate === "undefined" ? {
-          rejectUnauthorized: false
-        } : {
-          ca: credentials?.certificate
-        }
-      )
+      agent: new https2.Agent(typeof (credentials == null ? void 0 : credentials.certificate) === "undefined" ? {
+        rejectUnauthorized: false
+      } : {
+        ca: credentials == null ? void 0 : credentials.certificate
+      })
     });
+    ws.credentials = credentials;
     const errorHandler = ws.onerror = (err) => {
+      var _a;
       options.__internalRetryCount = options.__internalRetryCount ?? 0;
       options.pollInterval = options.pollInterval ?? 1e3;
       options.maxRetries = options.maxRetries ?? 10;
       if (options.__internalMockFaultyConnection && options.__internalMockCallback) {
         if (err.message.includes("EndTestOpen") && options.__internalRetryCount >= options.maxRetries)
           resolve(ws);
-        options.__internalMockCallback?.();
+        (_a = options.__internalMockCallback) == null ? void 0 : _a.call(options);
       }
       ws.close();
-      if (err.message.includes("ECONNREFUSED")) {
+      if (isConnectionRefusedMessage(err.message)) {
         options.__internalRetryCount++;
         if (options.maxRetries === 0) {
-          reject(new Error("Could not connect to LCU WebSocket API"));
+          reject(new WsConnectionRefusedError("Could not connect to LCU WebSocket API"));
         } else if (options.maxRetries > 0 && options.__internalRetryCount > options.maxRetries) {
-          reject(new Error(`Could not connect to LCU WebSocket API after ${options.__internalRetryCount - 1} retries`));
+          reject(new WsConnectionRefusedError(`Could not connect to LCU WebSocket API after ${options.__internalRetryCount - 1} retries`));
         } else {
           setTimeout(() => {
             resolve(createWebSocketConnection(options));
@@ -666,78 +571,18 @@ async function createWebSocketConnection(options = {}) {
     }
   });
 }
-
-// src/request_deprecated.ts
-import fetch, { Response as FetchResponse } from "node-fetch";
-import https3 from "https";
-var DEPRECATED_Response = class extends FetchResponse {
-  constructor(parent) {
-    super(parent.body, parent);
-  }
-  /**
-   * Deserialize the response body into T
-   */
-  async json() {
-    const object = await super.json();
-    return object;
-  }
-};
-async function DEPRECATED_request(options, credentials) {
-  const uri = trim(options.url);
-  const url = `https://127.0.0.1:${credentials?.port}/${uri}`;
-  const hasBody = options.method !== "GET" && options.body !== void 0;
-  const response = await fetch(url, {
-    method: options.method,
-    body: hasBody ? JSON.stringify(options.body) : void 0,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      Authorization: "Basic " + Buffer.from(`riot:${credentials?.password}`).toString("base64")
-    },
-    agent: new https3.Agent(
-      typeof credentials?.certificate === "undefined" ? {
-        rejectUnauthorized: false
-      } : {
-        ca: credentials?.certificate
-      }
-    )
-  });
-  return new DEPRECATED_Response(response);
-}
-
-// src/websocket_deprecated.ts
-import https4 from "https";
-async function DEPRECATED_connect(credentials) {
-  const url = `wss://riot:${credentials.password}@127.0.0.1:${credentials.port}`;
-  return new LeagueWebSocket(url, {
-    headers: {
-      Authorization: "Basic " + Buffer.from(`riot:${credentials.password}`).toString("base64")
-    },
-    agent: new https4.Agent(
-      typeof credentials?.certificate === "undefined" ? {
-        rejectUnauthorized: false
-      } : {
-        ca: credentials?.certificate
-      }
-    )
-  });
-}
 export {
   ClientAuthTimeoutError,
   ClientElevatedPermsError,
+  ClientInstallNotFoundError,
   ClientNotFoundError,
-  DEPRECATED_Response,
-  DEPRECATED_connect,
-  DEPRECATED_request,
   Http1Response,
-  Http2Response,
   InvalidPlatformError,
-  LeagueClient,
   LeagueWebSocket,
+  WsConnectionRefusedError,
   authenticate,
+  clearInstallDirCache,
   createHttp1Request,
-  createHttp2Request,
-  createHttpSession,
   createWebSocketConnection
 };
 //# sourceMappingURL=index.js.map

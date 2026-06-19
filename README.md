@@ -51,6 +51,24 @@ const credentials = await authenticate()
 // { port: 54321, password: 'abc123', pid: 12345, certificate: '...' }
 ```
 
+**Detection strategy (lockfile-first).** Credentials are resolved from the install
+directory's `lockfile` using only filesystem reads — no process spawn. The legacy
+process-command-line scan (PowerShell `Get-CimInstance` on Windows) runs **only as a
+fallback** when the install directory cannot be located or the lockfile cannot be read
+(e.g. an elevated client). On **Windows** (the primary target), an app that polls while
+League is closed therefore incurs roughly **zero process spawns** while idle. A stale
+`lockfile` (left after a crash) is detected via the recorded PID and treated as "not
+running". Resolution of the install directory is cached; call `clearInstallDirCache()`
+to force re-resolution.
+
+> On **macOS/Linux** the install directory is not auto-discovered — only `leagueInstallPath`
+> (or the `LEAGUE_INSTALL_PATH` env var) is honored. Without one, detection falls back to
+> the process scan (`ps`), so the spawn-free idle guarantee applies to Windows (or any
+> platform where the install path is provided).
+
+> Setting `name` to a non-default value (e.g. `RiotClientUx`) bypasses the lockfile path
+> and uses the process scan, since the lockfile is specific to the League client.
+
 **Options**
 
 | Option | Default | Description |
@@ -78,8 +96,9 @@ const credentials = await authenticate({
 | `ClientNotFoundError` | League not running or install path not yet available |
 | `ClientInstallNotFoundError` | League running but install directory cannot be found — prompt user for path |
 | `ClientElevatedPermsError` | League running as administrator |
-| `ClientAuthTimeoutError` | Found process but failed to retrieve auth info repeatedly |
+| `ClientAuthTimeoutError` | Found process but failed to retrieve auth info repeatedly (`awaitConnection`) |
 | `InvalidPlatformError` | Not running on Windows / macOS / Linux |
+| `WsConnectionRefusedError` | `createWebSocketConnection` exhausted retries on `ECONNREFUSED` (client starting/closing, or stale lockfile) |
 
 **Manual install path example**
 
@@ -144,36 +163,5 @@ const response = await createHttp1Request({
 const data = response.json()
 ```
 
-For HTTP/2:
-
-```ts
-import { authenticate, createHttpSession, createHttp2Request } from '@your-gg/league-connect'
-
-const credentials = await authenticate()
-const session = createHttpSession(credentials)
-const response = await createHttp2Request({
-  method: 'GET',
-  url: '/lol-summoner/v1/current-summoner',
-}, session, credentials)
-
-session.close()
-```
-
----
-
-### LeagueClient
-
-Monitors League Client start/stop events.
-
-```ts
-import { authenticate, LeagueClient } from '@your-gg/league-connect'
-
-const credentials = await authenticate()
-const client = new LeagueClient(credentials, { pollInterval: 2500 })
-
-client.on('connect', (newCredentials) => { /* League started */ })
-client.on('disconnect', () => { /* League closed */ })
-
-client.start()
-client.stop()
-```
+The credentials used by `createWebSocketConnection` are exposed on the returned socket as
+`ws.credentials`, so you can reuse them for `createHttp1Request` without authenticating again.
